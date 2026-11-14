@@ -31,26 +31,18 @@ MorphoProcessor::MorphoProcessor()
 MorphoProcessor::~MorphoProcessor() {}
 
 //==============================================================================
-void MorphoProcessor::prepareToPlay (double, int) {}
+void MorphoProcessor::prepareToPlay (double sampleRate, int)
+{
+    morphEngine.prepare (sampleRate);
+}
+
 void MorphoProcessor::releaseResources() {}
 
 void MorphoProcessor::processBlock (juce::AudioBuffer<float>& buffer,
                                     juce::MidiBuffer& midiMessages)
 {
-    juce::ignoreUnused (buffer);
-    // Audio and incoming MIDI pass through untouched; our CC messages are appended.
-
-    // Drain the lock-free FIFO populated by MorphEngine timer
-    OutgoingMidi msg;
-    while (morphEngine.readNextMidiMessage (msg))
-    {
-        int ch  = juce::jlimit (1, 16, msg.channel);
-        int cc  = juce::jlimit (0, 127, msg.cc);
-        int val = juce::jlimit (0, 127, msg.value);
-
-        midiMessages.addEvent (
-            juce::MidiMessage::controllerEvent (ch, cc, val), 0);
-    }
+    // Audio and incoming MIDI pass through untouched; our CC messages are added.
+    morphEngine.process (midiMessages, buffer.getNumSamples());
 }
 
 //==============================================================================

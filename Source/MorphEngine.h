@@ -6,18 +6,15 @@
 #include <juce_events/juce_events.h>
 #include "ParameterSlot.h"
 
-struct OutgoingMidi
-{
-    int channel  = 1;
-    int cc       = 0;
-    int value    = 0;
-};
-
 //==============================================================================
-// Runs on the JUCE message thread at 60 Hz.
-// Pushes OutgoingMidi items into a lock-free FIFO that processBlock() drains.
+// Interpolates 16 CC values towards a target set.
+//
+// The interpolation runs on the audio thread (process()), so morph timing
+// follows the audio clock and doesn't stall when the UI is busy. The message
+// thread hands over a morph request with startMorph(); a low-rate timer on the
+// message thread reports completion through onMorphFinished.
 //==============================================================================
-class MorphEngine : public juce::Timer
+class MorphEngine : private juce::Timer
 {
 public:
     enum class CurveMode { LINEAR, EASE, SCURVE };
@@ -25,7 +22,7 @@ public:
     MorphEngine();
     ~MorphEngine() override;
 
-    // Called from UI / message thread
+    // ── Message thread ────────────────────────────────────────────────────────
     void startMorph (const std::array<int, 16>& targets,
                      const std::array<ParameterSlot, 16>& slots,
                      int globalChannel,
@@ -35,41 +32,56 @@ public:
 
     bool  isMorphing()       const noexcept { return morphActive.load (std::memory_order_acquire); }
     float getProgress()      const noexcept { return progress.load   (std::memory_order_relaxed); }
-    void  setCurveMode (CurveMode m)        { curveMode = m; }
+    void  setCurveMode (CurveMode m)        { curveMode.store ((int) m, std::memory_order_relaxed); }
 
-    // Returns copy of current interpolated values (message-thread-safe)
+    // Current interpolated values (safe from any thread)
     std::array<int, 16> getCurrentValues() const;
 
-    // Called from audio thread in processBlock()
-    bool readNextMidiMessage (OutgoingMidi& out);
-
-    // Invoked by MorphEngine when morph completes or is stopped
+    // Invoked on the message thread when a morph completes or is stopped
     std::function<void (const std::array<int, 16>&)> onMorphFinished;
 
+    // ── Audio thread ──────────────────────────────────────────────────────────
+    void prepare (double newSampleRate) noexcept   { sampleRate = newSampleRate > 0.0 ? newSampleRate : 44100.0; }
+    void process (juce::MidiBuffer& midi, int numSamples) noexcept;
+
 private:
+    struct Request
+    {
+        std::array<int, 16> targets  {};
+        std::array<int, 16> ccNums   {};
+        std::array<int, 16> channels {};   // already resolved to 1–16
+        double durationMs = 0.0;
+        int    curve      = 0;
+    };
+
     void timerCallback() override;
-    double applyCurve (double t) const noexcept;
+    static double applyCurve (int curve, double t) noexcept;
+    void emitChanged (juce::MidiBuffer& midi, int samplePos) noexcept;
 
-    static constexpr int FIFO_SIZE = 512;
+    // Hand-over from message thread to audio thread
+    juce::SpinLock    requestLock;
+    Request           pendingRequest;
+    std::atomic<bool> hasPending    { false };
+    std::atomic<bool> stopRequested { false };
 
-    juce::AbstractFifo        abstractFifo { FIFO_SIZE };
-    std::array<OutgoingMidi, FIFO_SIZE> fifoData {};
+    // Shared state
+    std::atomic<bool>  morphActive     { false };
+    std::atomic<float> progress        { 0.0f  };
+    std::atomic<bool>  finishedPending { false };
+    std::atomic<int>   curveMode       { 0 };
+    std::array<std::atomic<int>, 16> currentVals;
 
-    std::atomic<bool>  morphActive { false };
-    std::atomic<float> progress    { 0.0f  };
-
-    std::array<double, 16> startVals    {};
-    std::array<int,    16> targetVals   {};
-    std::array<int,    16> lastSentVals {};
-    std::array<int,    16> currentVals  {};
-    std::array<int,    16> ccNums       {};
-    std::array<int,    16> channels     {};
-
-    int    globalCh      = 1;
-    double morphDuration = 0.0;
-    double elapsedMs     = 0.0;
-
-    CurveMode curveMode { CurveMode::LINEAR };
+    // Audio-thread state
+    Request active;
+    bool    running        = false;
+    double  sampleRate     = 44100.0;
+    double  elapsedSamples = 0.0;
+    double  totalSamples   = 0.0;
+    std::array<double, 16> startVals {};
+    std::array<int, 16>    liveVals  {};
+    std::array<int, 16>    sentVals  {};
+    std::array<int, 16>    sentCc    {};
+    std::array<int, 16>    sentCh    {};
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (MorphEngine)
 };
