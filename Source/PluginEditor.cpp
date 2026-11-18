@@ -205,25 +205,12 @@ void ParamSlotComponent::sliderValueChanged (juce::Slider* s)
     int newVal = (int) valueKnob.getValue();
     proc.paramSlots[index].value = newVal;
 
-    // Send CC immediately (snap, 0ms morph for live knob control)
+    // A zero-length morph to the current values: the engine sends only the slots that
+    // changed, so turning one knob sends one CC. Ignored mid-morph (the morph owns the values).
     std::array<int, 16> targets {};
-    for (int i = 0; i < 16; ++i)
+    for (size_t i = 0; i < 16; ++i)
         targets[i] = proc.paramSlots[i].value;
-    targets[index] = newVal;
 
-    // Only send the single changed parameter — wrap in a quick snap for this param
-    // by directly emitting through the engine as a one-param snap
-    // We do this by creating a temporary single-param approach:
-    // Actually just queue via processor sending directly is cleaner here.
-    // We'll push a raw MIDI CC via the engine's FIFO by doing a fake snap.
-    // Simpler: send direct via engine helper — but engine doesn't have that.
-    // Use processBlock path: store value, let the next processBlock send it
-    // via a flag. For simplicity, we prime the engine with a snap on this param only.
-
-    // Push directly to a separate "live CC" mechanism:
-    // We store a flag and let the processor send it in processBlock.
-    // For simplicity here, trigger a zero-duration morph on all slots
-    // from their current values — this sends CCs for changed params only.
     if (! proc.morphEngine.isMorphing())
     {
         proc.morphEngine.startMorph (targets, proc.paramSlots, proc.globalChannel, 0.0);
@@ -246,13 +233,17 @@ void ParamSlotComponent::showCCPopup()
     aw->addTextEditor ("cc", juce::String (proc.paramSlots[(size_t) index].ccNumber));
     aw->addButton ("OK",     1);
     aw->addButton ("Cancel", 0);
+    // The dialog can outlive this component (the host closes the plugin window while it's
+    // open), so the callback checks before touching it.
+    juce::Component::SafePointer<ParamSlotComponent> safeThis (this);
     aw->enterModalState (true, juce::ModalCallbackFunction::create (
-        [this, aw] (int result)
+        [safeThis, aw] (int result)
         {
-            if (result == 1)
+            if (result == 1 && safeThis != nullptr)
             {
-                int cc = aw->getTextEditorContents ("cc").getIntValue();
-                proc.paramSlots[(size_t) index].ccNumber = juce::jlimit (0, 127, cc);
+                const int cc = aw->getTextEditorContents ("cc").getIntValue();
+                safeThis->proc.paramSlots[(size_t) safeThis->index].ccNumber = juce::jlimit (0, 127, cc);
+                safeThis->refresh();
             }
             delete aw;
         }), false);
@@ -266,14 +257,16 @@ MorphoEditor::MorphoEditor (MorphoProcessor& p)
 {
     setLookAndFeel (&laf);
 
-    setSize (kWidth, kHeight);
+    // Build the controls before the first setSize(): setSize calls resized(), which lays
+    // them out (it used to run first and crash on the missing buttons when the window opened).
+    buildUI();
+
     setResizable (true, true);
     getConstrainer()->setFixedAspectRatio ((double) kWidth / (double) kHeight);
     getConstrainer()->setSizeLimits (kWidth / 2, kHeight / 2, kWidth * 2, kHeight * 2);
+    setSize (kWidth, kHeight);
 
-    buildUI();
-
-    proc.onStateChanged = [this] { refreshPresetButtons(); refreshParamSlots(); };
+    proc.onStateChanged = [this] { refreshPresetButtons(); refreshParamSlots(); refreshMorphControls(); };
 
     startTimerHz (30);
 }
@@ -317,31 +310,9 @@ void MorphoEditor::buildUI()
         btn->onClick = [this] (int idx, bool rightClick)
         {
             if (rightClick)
-            {
-                // Right-click: save preset with name dialog
-                proc.savePreset (idx);
-                auto* aw = new juce::AlertWindow ("Rename Preset", "Enter new name:", juce::MessageBoxIconType::NoIcon);
-                aw->addTextEditor ("name", proc.presets[(size_t) idx].name);
-                aw->addButton ("OK",     1);
-                aw->addButton ("Cancel", 0);
-                aw->enterModalState (true, juce::ModalCallbackFunction::create (
-                    [this, aw, idx] (int result)
-                    {
-                        if (result == 1)
-                        {
-                            juce::String newName = aw->getTextEditorContents ("name").substring (0, 16);
-                            if (newName.isNotEmpty())
-                                proc.presets[(size_t) idx].name = newName;
-                        }
-                        delete aw;
-                        refreshPresetButtons();
-                    }), false);
-            }
+                showPresetMenu (idx);
             else
-            {
-                // Left-click: recall
-                proc.recallPreset (idx);
-            }
+                proc.recallPreset (idx);   // left-click: recall
         };
         addAndMakeVisible (btn);
     }
@@ -356,6 +327,7 @@ void MorphoEditor::buildUI()
     morphTimeSlider.setSliderStyle (juce::Slider::LinearHorizontal);
     morphTimeSlider.setTextBoxStyle (juce::Slider::NoTextBox, false, 0, 0);
     morphTimeSlider.setRange (0.0, 30000.0, 1.0);
+    morphTimeSlider.setSkewFactorFromMidPoint (3000.0);   // half the travel covers 0 to 3 s
     morphTimeSlider.setValue (proc.morphTimeMs, juce::dontSendNotification);
     morphTimeSlider.onValueChange = [this]
     {
@@ -408,6 +380,52 @@ void MorphoEditor::buildUI()
 }
 
 //==============================================================================
+// Right-click on a preset: save, rename or clear. Saving over a stored preset asks first, so a
+// stray right-click can't lose one.
+void MorphoEditor::showPresetMenu (int idx)
+{
+    const auto& preset = proc.presets[(size_t) idx];
+    juce::PopupMenu m;
+    m.addSectionHeader ("Preset " + juce::String (idx + 1) + (preset.hasData ? ": " + preset.name : juce::String()));
+    m.addItem (1, preset.hasData ? "Save current values here (replace)" : "Save current values here");
+    m.addItem (2, "Rename...", preset.hasData);
+    m.addItem (3, "Clear", preset.hasData);
+
+    juce::Component::SafePointer<MorphoEditor> safeThis (this);
+    m.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (presetButtons[idx]),
+        [safeThis, idx] (int choice)
+        {
+            if (safeThis == nullptr) return;
+            auto& ed = *safeThis;
+            if (choice == 1)
+            {
+                const bool replacing = ed.proc.presets[(size_t) idx].hasData;
+                ed.proc.savePreset (idx);
+                if (! replacing) ed.askPresetName (idx);
+            }
+            else if (choice == 2) ed.askPresetName (idx);
+            else if (choice == 3) ed.proc.clearPreset (idx);
+        });
+}
+
+void MorphoEditor::askPresetName (int idx)
+{
+    auto* aw = new juce::AlertWindow ("Name preset " + juce::String (idx + 1), "Up to 16 characters:", juce::MessageBoxIconType::NoIcon);
+    aw->addTextEditor ("name", proc.presets[(size_t) idx].name);
+    aw->addButton ("OK", 1, juce::KeyPress (juce::KeyPress::returnKey));
+    aw->addButton ("Cancel", 0, juce::KeyPress (juce::KeyPress::escapeKey));
+
+    juce::Component::SafePointer<MorphoEditor> safeThis (this);
+    aw->enterModalState (true, juce::ModalCallbackFunction::create (
+        [safeThis, aw, idx] (int result)
+        {
+            if (result == 1 && safeThis != nullptr)
+                safeThis->proc.renamePreset (idx, aw->getTextEditorContents ("name"));
+            delete aw;
+        }), false);
+}
+
+//==============================================================================
 void MorphoEditor::paint (juce::Graphics& g)
 {
     g.fillAll (background);
@@ -422,6 +440,9 @@ void MorphoEditor::paint (juce::Graphics& g)
 
 void MorphoEditor::resized()
 {
+    if (presetButtons.size() < 16 || paramComponents.size() < 16)
+        return;
+
     auto scaled = [&] (int px) { return juce::roundToInt (px * getWidth() / (double) kWidth); };
     auto area   = getLocalBounds().reduced (scaled (6));
 

@@ -20,15 +20,28 @@ MorphoProcessor::MorphoProcessor()
     morphEngine.onMorphFinished = [this] (const std::array<int, 16>& finalVals)
     {
         // Called on message thread when morph completes or is stopped
-        for (int i = 0; i < 16; ++i)
+        for (size_t i = 0; i < 16; ++i)
             paramSlots[i].value = finalVals[i];
 
-        if (onStateChanged)
-            onStateChanged();
+        notifyStateChanged();
     };
 }
 
-MorphoProcessor::~MorphoProcessor() {}
+MorphoProcessor::~MorphoProcessor() { cancelPendingUpdate(); }
+
+void MorphoProcessor::notifyStateChanged()
+{
+    if (juce::MessageManager::existsAndIsCurrentThread())
+        handleAsyncUpdate();
+    else
+        triggerAsyncUpdate();
+}
+
+void MorphoProcessor::handleAsyncUpdate()
+{
+    if (onStateChanged)
+        onStateChanged();
+}
 
 //==============================================================================
 void MorphoProcessor::prepareToPlay (double sampleRate, int)
@@ -57,8 +70,10 @@ void MorphoProcessor::savePreset (int index)
     if (index < 0 || index >= 16) return;
 
     auto& p = presets[index];
-    for (int i = 0; i < 16; ++i)
-        p.values[i] = paramSlots[i].value;
+    // Mid-morph, paramSlots still hold the values from before it: save what is being sent now.
+    const auto live = morphEngine.isMorphing() ? morphEngine.getCurrentValues() : std::array<int, 16> {};
+    for (size_t i = 0; i < 16; ++i)
+        p.values[i] = morphEngine.isMorphing() ? live[i] : paramSlots[i].value;
 
     if (! p.hasData)
         p.name = "Preset " + juce::String (index + 1);
@@ -67,8 +82,24 @@ void MorphoProcessor::savePreset (int index)
     p.colorIndex = (p.colorIndex + 1) % 8;
     p.hasData    = true;
 
-    if (onStateChanged)
-        onStateChanged();
+    notifyStateChanged();
+}
+
+void MorphoProcessor::clearPreset (int index)
+{
+    if (index < 0 || index >= 16) return;
+    presets[(size_t) index] = PresetSlot {};
+    if (activePreset == index) activePreset = -1;
+    notifyStateChanged();
+}
+
+void MorphoProcessor::renamePreset (int index, const juce::String& name)
+{
+    if (index < 0 || index >= 16) return;
+    const auto clean = name.trim().substring (0, 16);
+    if (clean.isNotEmpty())
+        presets[(size_t) index].name = clean;
+    notifyStateChanged();
 }
 
 void MorphoProcessor::recallPreset (int index)
@@ -84,15 +115,13 @@ void MorphoProcessor::recallPreset (int index)
                              globalChannel,
                              morphTimeMs);
 
-    if (onStateChanged)
-        onStateChanged();
+    notifyStateChanged();
 }
 
 void MorphoProcessor::stopMorph()
 {
     morphEngine.stopMorph();
-    if (onStateChanged)
-        onStateChanged();
+    notifyStateChanged();
 }
 
 //==============================================================================
@@ -136,13 +165,21 @@ void MorphoProcessor::setStateInformation (const void* data, int sizeInBytes)
     juce::ValueTree state = juce::ValueTree::readFromData (data, (size_t) sizeInBytes);
     if (! state.isValid()) return;
 
-    globalChannel = state.getProperty (id ("globalChannel"), 1);
-    morphTimeMs   = state.getProperty (id ("morphTimeMs"),   0.0);
-    curveMode     = (MorphEngine::CurveMode) (int) state.getProperty (id ("curveMode"), 0);
-    activePreset  = state.getProperty (id ("activePreset"),  -1);
+    // Everything read back is clamped: a damaged or hand-edited session must not produce
+    // out-of-range CCs, channels or curve values.
+    auto intProp = [] (const juce::ValueTree& t, const char* key, int def, int lo, int hi)
+    {
+        const juce::var v = t.getProperty (id (key), def);
+        return juce::jlimit (lo, hi, v.isInt() || v.isInt64() || v.isDouble() || v.isBool() ? (int) v : def);
+    };
 
-    int paramIdx  = 0;
-    int presetIdx = 0;
+    globalChannel = intProp (state, "globalChannel", 1, 1, 16);
+    morphTimeMs   = juce::jlimit (0.0, 30000.0, (double) state.getProperty (id ("morphTimeMs"), 0.0));
+    curveMode     = (MorphEngine::CurveMode) intProp (state, "curveMode", 0, 0, 2);
+    activePreset  = intProp (state, "activePreset", -1, -1, 15);
+
+    size_t paramIdx  = 0;
+    size_t presetIdx = 0;
 
     for (int i = 0; i < state.getNumChildren(); ++i)
     {
@@ -150,32 +187,37 @@ void MorphoProcessor::setStateInformation (const void* data, int sizeInBytes)
 
         if (child.getType() == id ("Param") && paramIdx < 16)
         {
-            paramSlots[paramIdx].name     = child.getProperty (id ("name"),    "Param");
-            paramSlots[paramIdx].ccNumber = child.getProperty (id ("cc"),      1);
-            paramSlots[paramIdx].channel  = child.getProperty (id ("channel"), 0);
-            paramSlots[paramIdx].value    = child.getProperty (id ("value"),   0);
+            auto& slot   = paramSlots[paramIdx];
+            slot.name     = child.getProperty (id ("name"), "Param " + juce::String ((int) paramIdx + 1)).toString().substring (0, 16);
+            slot.ccNumber = intProp (child, "cc",      (int) paramIdx + 1, 0, 127);
+            slot.channel  = intProp (child, "channel", 0, 0, 16);
+            slot.value    = intProp (child, "value",   0, 0, 127);
             ++paramIdx;
         }
         else if (child.getType() == id ("Preset") && presetIdx < 16)
         {
-            presets[presetIdx].name       = child.getProperty (id ("name"),       "");
-            presets[presetIdx].colorIndex = child.getProperty (id ("colorIndex"), 0);
-            presets[presetIdx].hasData    = (bool) child.getProperty (id ("hasData"), false);
+            auto& preset      = presets[presetIdx];
+            preset.name       = child.getProperty (id ("name"), "").toString().substring (0, 16);
+            preset.colorIndex = intProp (child, "colorIndex", 0, 0, 7);
+            preset.hasData    = (bool) child.getProperty (id ("hasData"), false);
             for (int j = 0; j < 16; ++j)
-                presets[presetIdx].values[j] = child.getProperty (juce::Identifier ("v" + juce::String (j)), 0);
+                preset.values[(size_t) j] = intProp (child, ("v" + juce::String (j)).toRawUTF8(), 0, 0, 127);
             ++presetIdx;
         }
     }
 
+    if (activePreset >= 0 && ! presets[(size_t) activePreset].hasData)
+        activePreset = -1;
+    morphEngine.setCurveMode (curveMode);
+
     // Sync MorphEngine's current values to loaded param values
     // (MorphEngine starts with all zeros; we need to prime it so morphs start from correct values)
     std::array<int, 16> vals {};
-    for (int i = 0; i < 16; ++i) vals[i] = paramSlots[i].value;
+    for (size_t i = 0; i < 16; ++i) vals[i] = paramSlots[i].value;
     // Trigger a snap (0ms) to the current values to prime the engine
     morphEngine.startMorph (vals, paramSlots, globalChannel, 0.0);
 
-    if (onStateChanged)
-        onStateChanged();
+    notifyStateChanged();
 }
 
 //==============================================================================

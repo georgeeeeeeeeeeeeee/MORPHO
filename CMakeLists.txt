@@ -71,3 +71,21 @@ if(APPLE)
         VERBATIM
     )
 endif()
+
+# ── Tests (off by default; CI turns them on) ──────────────────────────────────
+option(MORPHO_BUILD_TESTS "Build the headless MORPHO tests" OFF)
+if(MORPHO_BUILD_TESTS)
+    juce_add_console_app(MORPHO_Tests PRODUCT_NAME "MORPHO_Tests")
+    target_sources(MORPHO_Tests PRIVATE
+        tests/MorphoTests.cpp
+        Source/PluginProcessor.cpp
+        Source/PluginEditor.cpp
+        Source/MorphEngine.cpp)
+    target_include_directories(MORPHO_Tests PRIVATE Source)
+    target_compile_definitions(MORPHO_Tests PRIVATE
+        JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0 JUCE_STANDALONE_APPLICATION=1
+        JUCE_MODAL_LOOPS_PERMITTED=1)   # lets the tests run the message loop briefly
+    target_link_libraries(MORPHO_Tests PRIVATE
+        juce::juce_audio_utils juce::juce_audio_processors
+        juce::juce_recommended_config_flags)
+endif()

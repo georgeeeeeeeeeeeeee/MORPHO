@@ -31,6 +31,9 @@ private:
     void layoutMorph     (juce::Rectangle<int> area);
     void layoutParams    (juce::Rectangle<int> area);
 
+    void showPresetMenu (int idx);
+    void askPresetName  (int idx);
+
     void refreshPresetButtons();
     void refreshParamSlots();
     void refreshMorphControls();

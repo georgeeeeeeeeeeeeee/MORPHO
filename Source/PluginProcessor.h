@@ -17,7 +17,8 @@ struct PresetSlot
 };
 
 //==============================================================================
-class MorphoProcessor : public juce::AudioProcessor
+class MorphoProcessor : public juce::AudioProcessor,
+                        private juce::AsyncUpdater
 {
 public:
     MorphoProcessor();
@@ -65,12 +66,19 @@ public:
     MorphEngine morphEngine;
 
     void savePreset   (int index);
+    void clearPreset  (int index);
+    void renamePreset (int index, const juce::String& name);
     void recallPreset (int index);
     void stopMorph();
 
-    // Editor sets this to receive UI repaint notifications
+    // Editor sets this to receive UI repaint notifications. Always called on the message thread.
     std::function<void()> onStateChanged;
 
 private:
+    // Tells the editor, on the message thread whichever thread the change came from
+    // (hosts may restore state on another thread).
+    void notifyStateChanged();
+    void handleAsyncUpdate() override;
+
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (MorphoProcessor)
 };
