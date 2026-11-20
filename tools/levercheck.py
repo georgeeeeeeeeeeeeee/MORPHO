@@ -133,7 +133,7 @@ check(any("[connected]" in l for l in states), "Lever answers HELLO: MORPHO show
 check(any(l.startswith("STATE waiting") for l in states[2:]), "MAP: the slot waits for a click")
 check(any(l.startswith("STATE mapped Bass \u203a Auto Filter \u203a Frequency") for l in states), "the click maps it: the slot shows Bass > Auto Filter > Frequency")
 check(any("slot name: Frequency" in l for l in states), "a slot still called Param 3 takes the name Frequency")
-check(("Frequency", ch, 2, "abs") in live_maps, "Lever made a real Live mapping: ch %d, CC 2 (slot 3)" % (ch + 1))
+check(("Frequency", ch, 2, "abs14") in live_maps, "Lever made a real Live mapping: ch %d, CC 2 + 34 (slot 3), Absolute 14-bit" % (ch + 1))
 ccs = [l for l in lines if l.startswith("CC ")]
 print("CCs on the bus after mapping:", ccs)
 check("CC %d 2 100" % ch in ccs, "slot 3's value (100) goes out on the bus for Live")

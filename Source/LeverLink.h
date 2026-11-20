@@ -37,7 +37,7 @@ private:
 
 struct Reply
 {
-    juce::String kind;   // hi, waiting, mapped, unmapped, cancelled, lost, tempo
+    juce::String kind;   // hi, waiting, mapped, unmapped, cancelled, lost, tempo, untempo
     int channel = -1;    // 0..15
     int cc = -1;
     juce::String text;   // the mapped parameter ("Bass > Auto Filter > Frequency") or the label
