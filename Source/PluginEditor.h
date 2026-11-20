@@ -45,6 +45,7 @@ private:
 
     //--- Header ---
     juce::Label titleLabel;
+    juce::Label leverStatus;
 
     //--- Global channel ---
     juce::Label    globalChLabel;
@@ -105,12 +106,15 @@ public:
 
 private:
     void showCCPopup();
+    void showMapMenu();
 
     int              index;
     MorphoProcessor& proc;
 
     juce::Label    nameLabel;
     juce::Label    ccLabel;
+    juce::TextButton mapButton { "MAP" };
+    juce::Label    linkLabel;
     juce::Slider   valueKnob;
     juce::ComboBox channelBox;
 

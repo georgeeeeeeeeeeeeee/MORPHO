@@ -6,6 +6,7 @@
 #include <juce_events/juce_events.h>
 #include "ParameterSlot.h"
 #include "MorphEngine.h"
+#include "LeverLink.h"
 
 //==============================================================================
 struct PresetSlot
@@ -18,7 +19,8 @@ struct PresetSlot
 
 //==============================================================================
 class MorphoProcessor : public juce::AudioProcessor,
-                        private juce::AsyncUpdater
+                        private juce::AsyncUpdater,
+                        private juce::Timer
 {
 public:
     MorphoProcessor();
@@ -71,6 +73,19 @@ public:
     void recallPreset (int index);
     void stopMorph();
 
+    // ── Click-to-map through the Lever script in Live (message thread) ──────────
+    // Each slot can also drive any Live control: Map, then click the control in Live. MORPHO sends
+    // the slot's value on the shared "IAC Driver Lever" bus (channel leverChannel, CC = slot index),
+    // and Lever maps it there. A slot's own CC on MORPHO's MIDI out is unaffected.
+    enum class Link { none, waiting, mapped, lost };
+    void requestMap (int slot);           // again: cancel
+    void unmapSlot (int slot);
+    Link linkState (int slot) const noexcept { return (Link) link[(size_t) slot].load(); }
+    juce::String mappedTo (int slot) const { return mappedNames[(size_t) slot]; }
+    bool leverConnected() const noexcept;
+    bool leverSilent() const noexcept { return silent; }
+    int  leverChannel = 9;                // 9..15, one per MORPHO instance (Dial uses 1-8, Pocket 16)
+
     // Editor sets this to receive UI repaint notifications. Always called on the message thread.
     std::function<void()> onStateChanged;
 
@@ -78,6 +93,23 @@ private:
     // Tells the editor, on the message thread whichever thread the change came from
     // (hosts may restore state on another thread).
     void notifyStateChanged();
+    void timerCallback() override;
+
+    // Sends mapped slots' values on the Lever bus whenever they change (every 5 ms at most).
+    struct BusSender final : juce::HighResolutionTimer
+    {
+        explicit BusSender (MorphoProcessor& o) : owner (o) {}
+        void hiResTimerCallback() override;
+        MorphoProcessor& owner;
+        std::array<int, 16> last {};
+    } busSender { *this };
+
+    lever::Link leverLink;
+    std::array<std::atomic<int>, 16> link {};
+    std::array<int, 16> beforeWait {};
+    std::array<juce::String, 16> mappedNames;
+    double askedMs = 0.0, helloMs = 0.0;
+    bool silent = false;
     void handleAsyncUpdate() override;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (MorphoProcessor)

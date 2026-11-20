@@ -50,8 +50,8 @@ void PresetSlotButton::paint (juce::Graphics& g)
     // Name
     if (preset.hasData && preset.name.isNotEmpty())
     {
-        g.setColour (active ? brightText : dimText.brighter (0.3f));
-        g.setFont (CustomLookAndFeel::getMonoFont (9.0f));
+        g.setColour (active ? brightText : brightText.withAlpha (0.8f));
+        g.setFont (CustomLookAndFeel::getMonoFont (10.0f));
         g.drawText (preset.name, bounds.toNearestInt(),
                     juce::Justification::centred, true);
     }
@@ -90,7 +90,7 @@ ParamSlotComponent::ParamSlotComponent (int idx, MorphoProcessor& p, CustomLookA
     nameLabel.setJustificationType (juce::Justification::centredLeft);
     nameLabel.setColour (juce::Label::textColourId, brightText);
     nameLabel.setColour (juce::Label::backgroundColourId, juce::Colours::transparentBlack);
-    nameLabel.setFont (CustomLookAndFeel::getMonoFont (11.0f));
+    nameLabel.setFont (CustomLookAndFeel::getMonoFont (12.0f).boldened());
     nameLabel.onTextChange = [this]
     {
         proc.paramSlots[index].name = nameLabel.getText (true).substring (0, 16);
@@ -101,7 +101,7 @@ ParamSlotComponent::ParamSlotComponent (int idx, MorphoProcessor& p, CustomLookA
     ccLabel.setEditable (false, true, false);
     ccLabel.setJustificationType (juce::Justification::centred);
     ccLabel.setColour (juce::Label::textColourId, dimText);
-    ccLabel.setFont (CustomLookAndFeel::getMonoFont (10.0f));
+    ccLabel.setFont (CustomLookAndFeel::getMonoFont (10.5f));
     ccLabel.onTextChange = [this]
     {
         int cc = ccLabel.getText().getIntValue();
@@ -110,6 +110,21 @@ ParamSlotComponent::ParamSlotComponent (int idx, MorphoProcessor& p, CustomLookA
                          juce::dontSendNotification);
     };
     addAndMakeVisible (ccLabel);
+
+    // Map: click it, then click any control in Live (through the Lever script). Right-click: unmap.
+    mapButton.setTooltip ("Map: click this, then click any control in Live, on any track. Right-click to unmap");
+    mapButton.onClick = [this]
+    {
+        if (juce::ModifierKeys::currentModifiers.isPopupMenu()) { showMapMenu(); return; }
+        proc.requestMap (index);
+        refresh();
+    };
+    addAndMakeVisible (mapButton);
+    linkLabel.setFont (CustomLookAndFeel::getMonoFont (10.0f));
+    linkLabel.setJustificationType (juce::Justification::centredLeft);
+    linkLabel.setMinimumHorizontalScale (0.7f);
+    linkLabel.setInterceptsMouseClicks (false, false);
+    addAndMakeVisible (linkLabel);
 
     // Value knob
     valueKnob.setSliderStyle (juce::Slider::Rotary);
@@ -147,8 +162,9 @@ void ParamSlotComponent::refresh()
 {
     auto& slot = proc.paramSlots[index];
 
-    nameLabel.setText (slot.name, juce::dontSendNotification);
-    ccLabel.setText ("CC " + juce::String (slot.ccNumber), juce::dontSendNotification);
+    // Refreshed 30 times a second now: leave a label alone while it's being typed into.
+    if (! nameLabel.isBeingEdited()) nameLabel.setText (slot.name, juce::dontSendNotification);
+    if (! ccLabel.isBeingEdited()) ccLabel.setText ("CC " + juce::String (slot.ccNumber), juce::dontSendNotification);
 
     ignoreSlider = true;
 
@@ -164,6 +180,39 @@ void ParamSlotComponent::refresh()
 
     int chId = (slot.channel == 0) ? 1 : (slot.channel + 1);
     channelBox.setSelectedId (chId, juce::dontSendNotification);
+
+    using L = MorphoProcessor::Link;
+    const auto ls = proc.linkState (index);
+    const auto full = proc.mappedTo (index);
+    const auto shortName = full.fromLastOccurrenceOf (juce::CharPointer_UTF8 ("\xe2\x80\xba"), false, false).trim();
+    mapButton.setButtonText (ls == L::waiting ? "CLICK" : ls == L::mapped ? "MAPPED" : "MAP");
+    mapButton.setColour (juce::TextButton::buttonColourId, ls == L::waiting ? accent : surface);
+    mapButton.setColour (juce::TextButton::textColourOffId, ls == L::waiting ? background : ls == L::mapped ? accent : brightText);
+    juce::String t;
+    juce::Colour c = dimText;
+    if (ls == L::waiting) { t = "click a Live control"; c = accent; }
+    else if (ls == L::mapped) { t = juce::String (juce::CharPointer_UTF8 ("\xe2\x86\x92 ")) + (shortName.isNotEmpty() ? shortName : full); }
+    else if (ls == L::lost) { t = "gone: " + shortName; c = warn; }
+    linkLabel.setText (t, juce::dontSendNotification);
+    linkLabel.setColour (juce::Label::textColourId, c);
+    linkLabel.setTooltip (full);
+}
+
+void ParamSlotComponent::showMapMenu()
+{
+    using L = MorphoProcessor::Link;
+    const auto ls = proc.linkState (index);
+    juce::PopupMenu m;
+    m.addItem (1, ls == L::waiting ? "Stop waiting for a click" : "Map: then click any control in Live");
+    m.addItem (2, "Unmap", ls == L::mapped || ls == L::lost);
+    if (ls == L::mapped || ls == L::lost) m.addItem (3, proc.mappedTo (index), false);
+    juce::Component::SafePointer<ParamSlotComponent> safeThis (this);
+    m.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (&mapButton), [safeThis] (int r) {
+        if (safeThis == nullptr) return;
+        if (r == 1) safeThis->proc.requestMap (safeThis->index);
+        else if (r == 2) safeThis->proc.unmapSlot (safeThis->index);
+        safeThis->refresh();
+    });
 }
 
 void ParamSlotComponent::resized()
@@ -178,9 +227,12 @@ void ParamSlotComponent::resized()
 
     area.removeFromTop (2);
 
-    // CC label at bottom
-    auto bottomRow = area.removeFromBottom (16);
-    ccLabel.setBounds (bottomRow);
+    // Bottom: [MAP] [CC n] [what it's mapped to]
+    auto bottomRow = area.removeFromBottom (18);
+    mapButton.setBounds (bottomRow.removeFromLeft (juce::jmin (64, bottomRow.getWidth() / 3)));
+    bottomRow.removeFromLeft (3);
+    ccLabel.setBounds (bottomRow.removeFromLeft (46));
+    linkLabel.setBounds (bottomRow);
 
     area.removeFromBottom (2);
 
@@ -287,9 +339,14 @@ void MorphoEditor::buildUI()
     titleLabel.setJustificationType (juce::Justification::centredLeft);
     addAndMakeVisible (titleLabel);
 
+    leverStatus.setFont (CustomLookAndFeel::getMonoFont (10.0f));
+    leverStatus.setJustificationType (juce::Justification::centredLeft);
+    leverStatus.setMinimumHorizontalScale (0.6f);
+    addAndMakeVisible (leverStatus);
+
     // Global channel
     globalChLabel.setText ("CH OUT", juce::dontSendNotification);
-    globalChLabel.setFont (CustomLookAndFeel::getMonoFont (10.0f));
+    globalChLabel.setFont (CustomLookAndFeel::getMonoFont (11.0f));
     globalChLabel.setColour (juce::Label::textColourId, dimText);
     globalChLabel.setJustificationType (juce::Justification::centredRight);
     addAndMakeVisible (globalChLabel);
@@ -319,7 +376,7 @@ void MorphoEditor::buildUI()
 
     // Morph time label + slider
     morphTimeLabel2.setText ("MORPH TIME", juce::dontSendNotification);
-    morphTimeLabel2.setFont (CustomLookAndFeel::getMonoFont (10.0f));
+    morphTimeLabel2.setFont (CustomLookAndFeel::getMonoFont (11.0f));
     morphTimeLabel2.setColour (juce::Label::textColourId, dimText);
     morphTimeLabel2.setJustificationType (juce::Justification::centredRight);
     addAndMakeVisible (morphTimeLabel2);
@@ -338,14 +395,14 @@ void MorphoEditor::buildUI()
     addAndMakeVisible (morphTimeSlider);
 
     morphTimeValueLabel.setText (morphTimeLabel (proc.morphTimeMs), juce::dontSendNotification);
-    morphTimeValueLabel.setFont (CustomLookAndFeel::getMonoFont (11.0f).boldened());
+    morphTimeValueLabel.setFont (CustomLookAndFeel::getMonoFont (12.0f).boldened());
     morphTimeValueLabel.setColour (juce::Label::textColourId, accent);
     morphTimeValueLabel.setJustificationType (juce::Justification::centredLeft);
     addAndMakeVisible (morphTimeValueLabel);
 
     // Curve selector
     curveLabel.setText ("CURVE", juce::dontSendNotification);
-    curveLabel.setFont (CustomLookAndFeel::getMonoFont (10.0f));
+    curveLabel.setFont (CustomLookAndFeel::getMonoFont (11.0f));
     curveLabel.setColour (juce::Label::textColourId, dimText);
     curveLabel.setJustificationType (juce::Justification::centredRight);
     addAndMakeVisible (curveLabel);
@@ -457,11 +514,13 @@ void MorphoEditor::resized()
 
 void MorphoEditor::layoutHeader (juce::Rectangle<int> area)
 {
-    titleLabel.setBounds (area.removeFromLeft (area.getWidth() / 2));
+    titleLabel.setBounds (area.removeFromLeft (110));
     auto right = area;
     globalChBox.setBounds   (right.removeFromRight (50));
     right.removeFromRight (6);
     globalChLabel.setBounds (right.removeFromRight (70));
+    right.removeFromRight (10);
+    leverStatus.setBounds (right);
 }
 
 void MorphoEditor::layoutPresets (juce::Rectangle<int> area)
@@ -525,6 +584,15 @@ void MorphoEditor::timerCallback()
         refreshParamSlots();
 
     stopMorphButton.setEnabled (morphing);
+
+    juce::String st;
+    juce::Colour c = dimText;
+    if (proc.leverConnected()) st = "LEVER CONNECTED: MAP a slot, then click any Live control";
+    else if (proc.leverSilent()) { st = "LEVER DIDN'T ANSWER: Live Settings > Control Surface: Lever, Input: IAC Driver Lever"; c = warn; }
+    else st = "Click-to-map: set Lever as a Control Surface (Input: IAC Driver Lever)";
+    if (leverStatus.getText() != st) { leverStatus.setText (st, juce::dontSendNotification); leverStatus.setColour (juce::Label::textColourId, c); }
+    // Map buttons change state without a morph (waiting, mapped): keep them current.
+    for (auto* pc : paramComponents) pc->refresh();
 }
 
 void MorphoEditor::refreshPresetButtons()

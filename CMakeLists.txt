@@ -40,6 +40,7 @@ target_sources(MORPHO PRIVATE
     Source/PluginProcessor.cpp
     Source/PluginEditor.cpp
     Source/MorphEngine.cpp
+    Source/LeverLink.cpp
 )
 
 target_include_directories(MORPHO PRIVATE Source)
@@ -82,7 +83,8 @@ if(MORPHO_BUILD_TESTS)
         tests/MorphoTests.cpp
         Source/PluginProcessor.cpp
         Source/PluginEditor.cpp
-        Source/MorphEngine.cpp)
+        Source/MorphEngine.cpp
+        Source/LeverLink.cpp)
     target_include_directories(MORPHO_Tests PRIVATE Source)
     target_compile_definitions(MORPHO_Tests PRIVATE
         JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0 JUCE_STANDALONE_APPLICATION=1
@@ -90,4 +92,14 @@ if(MORPHO_BUILD_TESTS)
     target_link_libraries(MORPHO_Tests PRIVATE
         juce::juce_audio_utils juce::juce_audio_processors
         juce::juce_recommended_config_flags)
+
+    # Click-to-map, end to end against the real Lever script: python3 tools/levercheck.py <this>
+    juce_add_console_app(MORPHO_LeverCheck PRODUCT_NAME "morpho-levercheck")
+    target_sources(MORPHO_LeverCheck PRIVATE tools/levercheck.cpp Source/PluginProcessor.cpp
+        Source/PluginEditor.cpp Source/MorphEngine.cpp Source/LeverLink.cpp)
+    target_include_directories(MORPHO_LeverCheck PRIVATE Source)
+    target_compile_definitions(MORPHO_LeverCheck PRIVATE
+        JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0 JUCE_STANDALONE_APPLICATION=1 JUCE_MODAL_LOOPS_PERMITTED=1)
+    target_link_libraries(MORPHO_LeverCheck PRIVATE
+        juce::juce_audio_utils juce::juce_audio_processors juce::juce_recommended_config_flags)
 endif()

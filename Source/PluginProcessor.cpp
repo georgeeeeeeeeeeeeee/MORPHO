@@ -1,6 +1,32 @@
 #include "PluginProcessor.h"
 #include "PluginEditor.h"
 
+#include <mutex>
+
+//==============================================================================
+namespace
+{
+// The Lever channels this plug-in's instances use, so each new one takes a free channel in 9..15.
+std::mutex channelLock;
+std::array<int, 17> channelUsers {};
+
+int claimChannel()
+{
+    const std::lock_guard<std::mutex> l (channelLock);
+    int ch = 9;
+    for (int c = 9; c <= 15; ++c) if (channelUsers[(size_t) c] == 0) { ch = c; break; }
+    ++channelUsers[(size_t) ch];
+    return ch;
+}
+
+void moveChannel (int from, int to)
+{
+    const std::lock_guard<std::mutex> l (channelLock);
+    if (from >= 1 && from <= 16 && channelUsers[(size_t) from] > 0) --channelUsers[(size_t) from];
+    if (to >= 1 && to <= 16) ++channelUsers[(size_t) to];
+}
+} // namespace
+
 //==============================================================================
 MorphoProcessor::MorphoProcessor()
     // Stereo in/out so Ableton Live will load it (Live rejects VST3s with no audio buses).
@@ -25,9 +51,115 @@ MorphoProcessor::MorphoProcessor()
 
         notifyStateChanged();
     };
+
+    leverChannel = claimChannel();
+    for (auto& v : busSender.last) v = -1;
+    busSender.startTimer (5);
+    startTimerHz (10);
 }
 
-MorphoProcessor::~MorphoProcessor() { cancelPendingUpdate(); }
+MorphoProcessor::~MorphoProcessor()
+{
+    busSender.stopTimer();
+    stopTimer();
+    moveChannel (leverChannel, 0);
+    cancelPendingUpdate();
+}
+
+//==============================================================================
+void MorphoProcessor::BusSender::hiResTimerCallback()
+{
+    const auto vals = owner.morphEngine.getCurrentValues();
+    const int ch = juce::jlimit (1, 16, owner.leverChannel) - 1;
+    for (size_t i = 0; i < 16; ++i)
+    {
+        if (owner.link[i].load() != (int) Link::mapped) { last[i] = -1; continue; }
+        if (vals[i] == last[i]) continue;
+        lever::Bus::get().send ((uint8_t) (0xB0 | ch), (uint8_t) i, (uint8_t) juce::jlimit (0, 127, vals[i]));
+        last[i] = vals[i];
+    }
+}
+
+bool MorphoProcessor::leverConnected() const noexcept
+{
+    const double h = leverLink.lastHeardMs();
+    return h > 0.0 && juce::Time::getMillisecondCounterHiRes() - h < 8000.0;
+}
+
+void MorphoProcessor::requestMap (int i)
+{
+    if (i < 0 || i >= 16) return;
+    const int ch = leverChannel - 1;
+    if (linkState (i) == Link::waiting)
+    {
+        lever::Bus::get().sendSysex (leverLink.cancel());
+        link[(size_t) i] = beforeWait[(size_t) i];
+        notifyStateChanged();
+        return;
+    }
+    for (size_t k = 0; k < 16; ++k)
+        if (link[k].load() == (int) Link::waiting) link[k] = beforeWait[k];
+    beforeWait[(size_t) i] = link[(size_t) i].load();
+    link[(size_t) i] = (int) Link::waiting;
+    askedMs = juce::Time::getMillisecondCounterHiRes();
+    silent = false;
+    lever::Bus::get().sendSysex (leverLink.map (ch, i, false, "MORPHO: " + paramSlots[(size_t) i].name));
+    notifyStateChanged();
+}
+
+void MorphoProcessor::unmapSlot (int i)
+{
+    if (i < 0 || i >= 16) return;
+    lever::Bus::get().sendSysex (leverLink.unmap (leverChannel - 1, i));
+    link[(size_t) i] = (int) Link::none;
+    mappedNames[(size_t) i].clear();
+    notifyStateChanged();
+}
+
+void MorphoProcessor::timerCallback()
+{
+    const double now = juce::Time::getMillisecondCounterHiRes();
+    if (now - helloMs > 3000.0)
+    {
+        helloMs = now;
+        lever::Bus::get().sendSysex (leverLink.hello ("MORPHO"));
+    }
+    bool changed = false;
+    const int ch = leverChannel - 1;
+    for (const auto& r : leverLink.pop())
+    {
+        if (r.kind == "hi") { changed = true; continue; }
+        if (r.channel != ch || r.cc < 0 || r.cc > 15) continue;
+        const auto i = (size_t) r.cc;
+        auto st = (Link) link[i].load();
+        if (r.kind == "mapped")
+        {
+            st = Link::mapped;
+            mappedNames[i] = r.text;
+            // A slot still called "Param N" takes the name of what it now drives.
+            if (paramSlots[i].name == "Param " + juce::String ((int) i + 1))
+                paramSlots[i].name = r.text.fromLastOccurrenceOf (juce::CharPointer_UTF8 ("\xe2\x80\xba"), false, false).trim().substring (0, 16);
+        }
+        else if (r.kind == "unmapped") { if (st != Link::waiting) st = Link::none; mappedNames[i].clear(); }
+        else if (r.kind == "lost") { st = Link::lost; mappedNames[i] = r.text; }
+        else if (r.kind == "cancelled" && st == Link::waiting) st = (Link) beforeWait[i];
+        link[i] = (int) st;
+        changed = true;
+    }
+    if (silent && leverConnected() && leverLink.lastHeardMs() > askedMs) { silent = false; changed = true; }
+    if (askedMs > 0.0 && now - askedMs > 1500.0)
+    {
+        if (leverLink.lastHeardMs() < askedMs)
+        {
+            silent = true;
+            for (size_t k = 0; k < 16; ++k)
+                if (link[k].load() == (int) Link::waiting) link[k] = beforeWait[k];
+            changed = true;
+        }
+        askedMs = 0.0;
+    }
+    if (changed) notifyStateChanged();
+}
 
 void MorphoProcessor::notifyStateChanged()
 {
@@ -134,6 +266,7 @@ void MorphoProcessor::getStateInformation (juce::MemoryBlock& destData)
     state.setProperty (id ("morphTimeMs"),   morphTimeMs,   nullptr);
     state.setProperty (id ("curveMode"),     (int) curveMode, nullptr);
     state.setProperty (id ("activePreset"),  activePreset,  nullptr);
+    state.setProperty (id ("leverChannel"),  leverChannel,  nullptr);
 
     for (int i = 0; i < 16; ++i)
     {
@@ -142,6 +275,8 @@ void MorphoProcessor::getStateInformation (juce::MemoryBlock& destData)
         slot.setProperty (id ("cc"),       paramSlots[i].ccNumber, nullptr);
         slot.setProperty (id ("channel"),  paramSlots[i].channel,  nullptr);
         slot.setProperty (id ("value"),    paramSlots[i].value,    nullptr);
+        if (linkState (i) == Link::mapped || linkState (i) == Link::lost)
+            slot.setProperty (id ("mappedTo"), mappedNames[(size_t) i], nullptr);
         state.addChild (slot, -1, nullptr);
     }
 
@@ -177,6 +312,13 @@ void MorphoProcessor::setStateInformation (const void* data, int sizeInBytes)
     morphTimeMs   = juce::jlimit (0.0, 30000.0, (double) state.getProperty (id ("morphTimeMs"), 0.0));
     curveMode     = (MorphEngine::CurveMode) intProp (state, "curveMode", 0, 0, 2);
     activePreset  = intProp (state, "activePreset", -1, -1, 15);
+    // The saved Lever channel, so the set's mappings (made on it) still apply.
+    if (state.hasProperty (id ("leverChannel")))
+    {
+        const int ch = intProp (state, "leverChannel", leverChannel, 9, 15);
+        moveChannel (leverChannel, ch);
+        leverChannel = ch;
+    }
 
     size_t paramIdx  = 0;
     size_t presetIdx = 0;
@@ -192,6 +334,9 @@ void MorphoProcessor::setStateInformation (const void* data, int sizeInBytes)
             slot.ccNumber = intProp (child, "cc",      (int) paramIdx + 1, 0, 127);
             slot.channel  = intProp (child, "channel", 0, 0, 16);
             slot.value    = intProp (child, "value",   0, 0, 127);
+            // Shown until Lever confirms it (or reports it gone) a moment after the set opens.
+            mappedNames[paramIdx] = child.getProperty (id ("mappedTo"), "").toString();
+            link[paramIdx] = (int) (mappedNames[paramIdx].isEmpty() ? Link::none : Link::mapped);
             ++paramIdx;
         }
         else if (child.getType() == id ("Preset") && presetIdx < 16)

@@ -10,13 +10,15 @@
 //==============================================================================
 namespace MorphoColors
 {
-    inline const juce::Colour background  { 0xff0d0d0d };
-    inline const juce::Colour surface     { 0xff1a1a1a };
-    inline const juce::Colour surfaceHigh { 0xff262626 };
+    // Brighter than 1.0's palette (George: "too dark to read"): text and outlines lifted, same look.
+    inline const juce::Colour background  { 0xff121212 };
+    inline const juce::Colour surface     { 0xff1e1e1e };
+    inline const juce::Colour surfaceHigh { 0xff303030 };
     inline const juce::Colour accent      { 0xffe8ff00 };
-    inline const juce::Colour dimText     { 0xff666666 };
-    inline const juce::Colour brightText  { 0xffcccccc };
-    inline const juce::Colour trackBg     { 0xff2a2a2a };
+    inline const juce::Colour dimText     { 0xffa6a6a6 };
+    inline const juce::Colour brightText  { 0xfff2f2f2 };
+    inline const juce::Colour trackBg     { 0xff3c3c3c };
+    inline const juce::Colour warn        { 0xffff6b5e };
 
     inline const juce::Colour presetColors[8] {
         juce::Colour (0xffff4444),
@@ -191,26 +193,28 @@ public:
     }
 
     //==========================================================================
-    juce::Font getLabelFont (juce::Label&) override
+    juce::Font getLabelFont (juce::Label& l) override
     {
-        return getMonoFont (11.0f);
+        return l.getFont();
     }
 
     juce::Font getComboBoxFont (juce::ComboBox&) override
     {
-        return getMonoFont (11.0f);
+        return getMonoFont (12.5f);
     }
 
     juce::Font getTextButtonFont (juce::TextButton&, int) override
     {
-        return getMonoFont (11.0f);
+        return getMonoFont (12.0f).boldened();
     }
 
+    // Menlo: a sturdier monospace than Courier New, which was thin and hard to read on black.
+    // Sizes are scaled up a little to match.
     static juce::Font getMonoFont (float size)
     {
         return juce::Font (juce::FontOptions()
-                               .withName ("Courier New")
-                               .withHeight (size));
+                               .withName ("Menlo")
+                               .withHeight (size * 1.12f));
     }
 
 private:
