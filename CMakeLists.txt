@@ -20,7 +20,7 @@ FetchContent_MakeAvailable(JUCE)
 
 # ── Plugin target ─────────────────────────────────────────────────────────────
 juce_add_plugin(MORPHO
-    COMPANY_NAME                "Morpho Audio"
+    COMPANY_NAME                "LeverStudios"   # the folder hosts list it under; IDs stay Mrph/Mrph
     BUNDLE_ID                   "com.morphoaudio.MORPHO"
     PLUGIN_MANUFACTURER_CODE    Mrph
     PLUGIN_CODE                 Mrph

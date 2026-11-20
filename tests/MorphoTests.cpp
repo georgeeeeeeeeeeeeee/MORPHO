@@ -117,6 +117,45 @@ int main()
     }
 
     {
+        // Turning a knob mid-morph takes over, and nothing pulls it back afterwards
+        MorphoProcessor p;
+        p.prepareToPlay (sr, 512);
+        run (p, 1024);
+        for (auto& v : p.presets[0].values) v = 127;
+        p.presets[0].hasData = true;
+        p.morphTimeMs = 2000.0;
+        p.recallPreset (0);
+        run (p, 24000);   // half way
+        std::unique_ptr<juce::AudioProcessorEditor> ed (p.createEditor());
+        juce::Slider* knob = nullptr;
+        std::function<void (juce::Component&)> find = [&] (juce::Component& c) {
+            for (auto* ch : c.getChildren())
+            {
+                if (auto* sl = dynamic_cast<juce::Slider*> (ch); sl != nullptr && knob == nullptr && sl->getSliderStyle() == juce::Slider::Rotary) knob = sl;
+                find (*ch);
+            }
+        };
+        find (*ed);
+        check (knob != nullptr && p.morphEngine.isMorphing(), "(set-up: mid-morph, found slot 1's knob)");
+        if (knob != nullptr)
+        {
+            knob->setValue (10.0, juce::sendNotificationSync);
+            check (! p.morphEngine.isMorphing(), "turning a knob mid-morph stops the morph");
+            const auto sent = run (p, 48000 * 3);
+            const auto after = lastValues (sent, std::array<int, 16> { 10 });
+            settle();
+            run (p, 2048);
+            check (after[0] == 10 && p.paramSlots[0].value == 10 && (int) knob->getValue() == 10,
+                   "the knob stays where it was put (sent " + juce::String (after[0]) + ", slot " + juce::String (p.paramSlots[0].value) + ")");
+            knob->setValue (90.0, juce::sendNotificationSync);
+            run (p, 2048);
+            settle();
+            check (p.paramSlots[0].value == 90 && (int) knob->getValue() == 90, "after a finished morph, the knob moves freely");
+        }
+        ed.reset();
+    }
+
+    {
         // Range: the knob covers only Min..Max (presets keep knob positions)
         MorphoProcessor p;
         p.prepareToPlay (sr, 512);

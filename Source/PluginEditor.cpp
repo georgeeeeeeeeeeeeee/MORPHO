@@ -221,6 +221,7 @@ ParamSlotComponent::ParamSlotComponent (int idx, MorphoProcessor& p, CustomLookA
     valueKnob.setRange (0, 127, 1);
     valueKnob.setDoubleClickReturnValue (true, 0);
     valueKnob.addListener (this);
+    valueKnob.onDragStart = [this] { if (proc.morphEngine.isMorphing()) proc.stopMorph(); };
 
     // Right-click popup to set CC number
     valueKnob.onValueChange = nullptr;  // using listener instead
@@ -264,7 +265,8 @@ void ParamSlotComponent::refresh()
         auto vals = proc.morphEngine.getCurrentValues();
         displayVal = vals[index];
     }
-    valueKnob.setValue (displayVal, juce::dontSendNotification);
+    if (! valueKnob.isMouseButtonDown())   // never fight a knob you're holding
+        valueKnob.setValue (displayVal, juce::dontSendNotification);
     if (! range.isMouseButtonDown())
     {
         range.setMinValue (slot.minValue, juce::dontSendNotification, true);
@@ -356,19 +358,22 @@ void ParamSlotComponent::sliderValueChanged (juce::Slider* s)
 {
     if (ignoreSlider || s != &valueKnob) return;
 
-    int newVal = (int) valueKnob.getValue();
+    // Touching a knob mid-morph takes over: the morph stops where it is (every slot holds its
+    // current value) and this knob goes where you put it.
+    const int newVal = (int) valueKnob.getValue();   // before stopping: that redraws the knobs
+    if (proc.morphEngine.isMorphing())
+        proc.stopMorph();
     proc.paramSlots[index].value = newVal;
+    ignoreSlider = true;
+    valueKnob.setValue (newVal, juce::dontSendNotification);
+    ignoreSlider = false;
 
     // A zero-length morph to the current values: the engine sends only the slots that
-    // changed, so turning one knob sends one CC. Ignored mid-morph (the morph owns the values).
+    // changed, so turning one knob sends one CC.
     std::array<int, 16> targets {};
     for (size_t i = 0; i < 16; ++i)
         targets[i] = proc.paramSlots[i].value;
-
-    if (! proc.morphEngine.isMorphing())
-    {
-        proc.morphEngine.startMorph (targets, proc.paramSlots, proc.globalChannel, 0.0);
-    }
+    proc.morphEngine.startMorph (targets, proc.paramSlots, proc.globalChannel, 0.0);
 }
 
 void ParamSlotComponent::mouseDown (const juce::MouseEvent& e)
