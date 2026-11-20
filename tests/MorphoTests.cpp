@@ -42,6 +42,56 @@ std::array<int, 16> lastValues (const std::vector<Cc>& ccs, std::array<int, 16> 
     return start;
 }
 
+// Live's transport, for Follow: 4/4 at 120 BPM unless set otherwise; ppq moves on with each block.
+struct Transport final : juce::AudioPlayHead
+{
+    double ppq = 0.0, bpm = 120.0;
+    bool playing = true;
+    juce::Optional<PositionInfo> getPosition() const override
+    {
+        PositionInfo p;
+        p.setBpm (bpm);
+        p.setIsPlaying (playing);
+        p.setPpqPosition (ppq);
+        p.setTimeSignature (TimeSignature { 4, 4 });
+        p.setPpqPositionOfLastBarStart (std::floor (ppq / 4.0) * 4.0);
+        return p;
+    }
+};
+
+std::vector<Cc> play (MorphoProcessor& p, Transport& t, int samples, double sr = 48000.0, int block = 512)
+{
+    std::vector<Cc> out;
+    juce::AudioBuffer<float> audio (2, block);
+    for (int done = 0; done < samples; done += block)
+    {
+        juce::MidiBuffer midi;
+        audio.clear();
+        p.processBlock (audio, midi);
+        for (const auto m : midi)
+        {
+            const auto msg = m.getMessage();
+            if (msg.isController())
+                out.push_back ({ done + m.samplePosition, msg.getChannel(), msg.getControllerNumber(), msg.getControllerValue() });
+        }
+        if (t.playing) t.ppq += block * t.bpm / 60.0 / sr;
+    }
+    return out;
+}
+
+// A processor with presets 1..n saved (preset k: every knob at 10 * (k + 1)), playing preset 1.
+void withPresets (MorphoProcessor& p, int n)
+{
+    for (int k = 0; k < n; ++k)
+    {
+        p.presets[(size_t) k].hasData = true;
+        p.presets[(size_t) k].name = "P" + juce::String (k + 1);
+        p.presets[(size_t) k].values.fill (10 * (k + 1));
+    }
+    p.syncFollow();
+    p.recallPreset (0);
+}
+
 void settle()   // let message-thread timers (morph finished) run
 {
     juce::MessageManager::getInstance()->runDispatchLoopUntil (120);
@@ -217,6 +267,126 @@ int main()
         check (d.globalChannel == 1 && d.paramSlots[0].ccNumber == 1, "garbage state is ignored");
     }
 
+    // ── Follow ────────────────────────────────────────────────────────────────
+    {
+        MorphoProcessor p;
+        p.prepareToPlay (sr, 512);
+        Transport t;
+        p.setPlayHead (&t);
+        withPresets (p, 2);
+        p.followOn = true; p.followEvery = 0; p.followChance = 100; p.followPick = FollowSettings::next;
+        p.syncFollow();
+        auto ccs = play (p, t, 48000 * 5);   // 2.5 bars at 120
+        std::vector<Cc> cc1;
+        for (const auto& c : ccs) if (c.cc == 1) cc1.push_back (c);
+        check (! cc1.empty() && cc1[0].sample == 0 && cc1[0].value == 10, "(set-up: preset 1 snapped in at the start)");
+        check (cc1.size() >= 3 && cc1[1].sample == 96000 && cc1[1].value == 20, "Follow: on bar 2's line (sample 96000, mid-block) it moves to the next preset");
+        check (cc1.size() >= 3 && cc1[2].sample == 192000 && cc1[2].value == 10, "Follow: Next wraps round at bar 3");
+        check (cc1.size() == 3, "Follow: nothing else moves, and pressing play on bar 1 doesn't count as a line");
+        check (p.followNextBar() == 4, "Follow: it says which bar is next (bar 4)");
+        p.setPlayHead (nullptr);
+    }
+    {
+        // Ends on the line: a 1-beat morph (500 ms at 120) starts a beat before the line and lands on it.
+        MorphoProcessor p;
+        p.prepareToPlay (sr, 512);
+        Transport t;
+        p.setPlayHead (&t);
+        withPresets (p, 2);
+        p.morphTimeMs = 500.0;
+        p.recallPreset (0);
+        play (p, t, 512);   // let the (500 ms) recall run from 0 ...
+        t.ppq = 0.0;
+        play (p, t, 24000);   // ... and finish
+        t.ppq = 0.0;
+        t.playing = false;
+        play (p, t, 512);
+        t.playing = true;
+        p.followOn = true; p.followEvery = 0; p.followChance = 100; p.followPick = FollowSettings::next;
+        p.followLand = FollowSettings::arriveOnTheLine;
+        p.syncFollow();
+        p.timerCallbackForTests();
+        auto ccs = play (p, t, 120000);
+        std::vector<Cc> cc1;
+        for (const auto& c : ccs) if (c.cc == 1) cc1.push_back (c);
+        // 10 -> 20 linear over 24000 samples from 72000: 11 is first sent 5% in (73200), 20 at 95% (94800);
+        // the engine steps every 32 samples.
+        check (! cc1.empty() && cc1.front().value == 11 && std::abs (cc1.front().sample - 73200) <= 32, "Follow, ends on the line: the morph starts a beat early (11 at " + juce::String (cc1.empty() ? -1 : cc1.front().sample) + ")");
+        check (! cc1.empty() && cc1.back().value == 20 && std::abs (cc1.back().sample - 94800) <= 32, "Follow, ends on the line: it arrives on the line (20 at " + juce::String (cc1.empty() ? -1 : cc1.back().sample) + ")");
+        check (! p.morphEngine.isMorphing(), "Follow, ends on the line: the morph is over by the line");
+        p.setPlayHead (nullptr);
+    }
+    {
+        MorphoProcessor p;
+        p.prepareToPlay (sr, 512);
+        Transport t;
+        p.setPlayHead (&t);
+        withPresets (p, 3);
+        play (p, t, 512);
+        p.followOn = true; p.followEvery = 0; p.followChance = 0;
+        p.syncFollow();
+        check (play (p, t, 48000 * 16).empty(), "Follow: Chance 0% never changes");
+        p.followOn = false; p.followChance = 100;
+        check (play (p, t, 48000 * 16).empty(), "Follow off: nothing changes");
+        p.followOn = true;
+        t.playing = false;
+        check (play (p, t, 48000 * 16).empty(), "Follow: nothing happens with the transport stopped");
+        p.setPlayHead (nullptr);
+    }
+    {
+        // Any other, by weight: preset 3 set to Never is never picked; the others both come up.
+        MorphoProcessor p;
+        p.prepareToPlay (sr, 512);
+        Transport t;
+        p.setPlayHead (&t);
+        withPresets (p, 3);
+        p.setFollowSeed (7);
+        p.setPresetWeight (2, 0);
+        p.followOn = true; p.followEvery = 0; p.followChance = 100; p.followPick = FollowSettings::anyOther;
+        p.syncFollow();
+        auto ccs = play (p, t, 48000 * 2 * 40);   // 40 bars
+        std::array<int, 4> seen {};
+        int changes = 0;
+        for (const auto& c : ccs) if (c.cc == 1 && c.sample > 0) { ++changes; seen[(size_t) juce::jlimit (0, 3, c.value / 10 - 1)]++; }
+        check (seen[2] == 0, "Follow: a preset set to Never is never picked");
+        check (changes == 39, "Follow, any other: every line changes preset (2 to pick from, never the same twice) (got " + juce::String (changes) + ")");
+        check (seen[0] > 0 && seen[1] > 0, "Follow: the others are both picked");
+        p.setPlayHead (nullptr);
+    }
+    {
+        // Every 4 bars, in a loop: the line is decided again after the loop jumps back.
+        MorphoProcessor p;
+        p.prepareToPlay (sr, 512);
+        Transport t;
+        p.setPlayHead (&t);
+        withPresets (p, 2);
+        p.followOn = true; p.followEvery = 2; p.followChance = 100; p.followPick = FollowSettings::next;
+        p.syncFollow();
+        auto ccs = play (p, t, 48000 * 9);   // 4.5 bars: one line, bar 5 (sample 384000)
+        int at = -1;
+        for (const auto& c : ccs) if (c.cc == 1 && c.sample > 0) at = c.sample;
+        check (at == 384000, "Follow: every 4 bars changes on bar 5's line (got " + juce::String (at) + ")");
+        t.ppq = 0.0;   // the loop jumps back
+        auto again = play (p, t, 48000 * 9);
+        int at2 = -1;
+        for (const auto& c : again) if (c.cc == 1 && c.sample > 0) at2 = c.sample;
+        check (at2 == 384000, "Follow: after a jump back it changes on the line again");
+        p.setPlayHead (nullptr);
+    }
+    {
+        MorphoProcessor a;
+        withPresets (a, 2);
+        a.followOn = true; a.followEvery = 4; a.followLand = 1; a.followChance = 40; a.followPick = 3;
+        a.setPresetWeight (1, 4);
+        juce::MemoryBlock mb;
+        a.getStateInformation (mb);
+        MorphoProcessor b;
+        b.setStateInformation (mb.getData(), (int) mb.getSize());
+        check (b.followOn.load() && b.followEvery.load() == 4 && b.followLand.load() == 1 && b.followChance.load() == 40 && b.followPick.load() == 3,
+               "Follow settings survive a save and load");
+        check (b.presets[1].weight == 4 && b.presets[0].weight == 2, "preset weights survive a save and load");
+    }
+
     {
         MorphoProcessor p;
         p.presets[3].hasData = true; p.presets[3].name = "X";
@@ -241,11 +411,13 @@ int main()
         p.paramSlots[1].name = "Resonance"; p.paramSlots[1].ccNumber = 71; p.paramSlots[1].value = 40;
         p.paramSlots[0].minValue = 30; p.paramSlots[0].maxValue = 100;
         p.presets[0].hasData = true; p.presets[0].name = "Preset 1";
+        p.followOn = true;   // draw the Follow row in use
+        p.followChance = 75;
         std::unique_ptr<juce::AudioProcessorEditor> ed (p.createEditor());
-        check (ed != nullptr && ed->getWidth() == 820 && ed->getHeight() == 560, "the window opens at its full size");
-        ed->setSize (410, 280);
+        check (ed != nullptr && ed->getWidth() == 820 && ed->getHeight() == 620, "the window opens at its full size");
+        ed->setSize (410, 310);
         check (ed->getWidth() == 410, "the window resizes without trouble");
-        ed->setSize (820, 560);
+        ed->setSize (820, 620);
         auto img = ed->createComponentSnapshot (ed->getLocalBounds(), true, 2.0f);
         check (img.isValid() && img.getWidth() == 1640, "the window draws");
         if (auto* path = std::getenv ("MORPHO_SNAPSHOT"))   // MORPHO_SNAPSHOT=ui.png: save the picture

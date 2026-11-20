@@ -53,6 +53,8 @@ private:
     void layoutPresets   (juce::Rectangle<int> area);
     void layoutMorph     (juce::Rectangle<int> area);
     void layoutParams    (juce::Rectangle<int> area);
+    void layoutFollow    (juce::Rectangle<int> area);
+    void refreshFollow();
 
     void showPresetMenu (int idx);
     void askPresetName  (int idx);
@@ -85,13 +87,19 @@ private:
     juce::ComboBox curveBox;
     juce::TextButton stopMorphButton { "STOP MORPH" };
 
+    //--- Follow ---
+    juce::TextButton followButton { "FOLLOW" };
+    juce::Label      everyLabel, landLabel, chanceLabel, pickLabel, followStatus;
+    juce::ComboBox   everyBox, landBox, pickBox;
+    juce::Slider     chanceSlider;
+
     //--- Parameter grid ---
     juce::OwnedArray<ParamSlotComponent> paramComponents;
 
     InlinePrompt inlinePrompt;   // on top of everything
 
     static constexpr int kWidth  = 820;
-    static constexpr int kHeight = 560;
+    static constexpr int kHeight = 620;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (MorphoEditor)
 };

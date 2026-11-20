@@ -125,6 +125,34 @@ void PresetSlotButton::paint (juce::Graphics& g)
                     juce::Justification::centred, true);
     }
 
+    // Follow: how likely this preset is to be picked (dots), and a marker on the one coming next.
+    if (preset.hasData && proc.followOn.load())
+    {
+        const int w = preset.weight;
+        const auto full = getLocalBounds().toFloat().reduced (1.5f);
+        if (w == 0)
+        {
+            g.setColour (dimText.withAlpha (0.7f));
+            g.setFont (CustomLookAndFeel::getMonoFont (9.0f));
+            g.drawText ("SKIP", full.withTrimmedTop (full.getHeight() - 12.0f).toNearestInt(), juce::Justification::centred, false);
+        }
+        else
+        {
+            const int dots = w == 1 ? 1 : w == 2 ? 2 : 3;
+            const float d = 3.0f, gap = 3.0f, x0 = full.getCentreX() - (dots * d + (dots - 1) * gap) * 0.5f;
+            g.setColour (dimText.withAlpha (0.8f));
+            for (int k = 0; k < dots; ++k) g.fillEllipse (x0 + k * (d + gap), full.getBottom() - 6.0f, d, d);
+        }
+        if (proc.followNextPreset() == index && ! active)
+        {
+            g.setColour (accent);
+            juce::Path tri;
+            tri.addTriangle (full.getRight() - 10.0f, full.getY() + 2.0f, full.getRight() - 2.0f, full.getY() + 2.0f, full.getRight() - 2.0f, full.getY() + 10.0f);
+            g.fillPath (tri);
+            g.drawRoundedRectangle (full, 4.0f, 1.0f);
+        }
+    }
+
     // Progress bar overlay during morph
     if (active && proc.morphEngine.isMorphing())
     {
@@ -526,6 +554,55 @@ void MorphoEditor::buildUI()
     stopMorphButton.setColour (juce::TextButton::textColourOffId,   juce::Colour (0xffff4444));
     addAndMakeVisible (stopMorphButton);
 
+    // Follow: Live-style follow actions for presets
+    followButton.setClickingTogglesState (true);
+    followButton.setToggleState (proc.followOn.load(), juce::dontSendNotification);
+    followButton.setColour (juce::TextButton::buttonOnColourId, accent);
+    followButton.setColour (juce::TextButton::textColourOnId, background);
+    followButton.setTooltip ("At the end of each phrase, maybe morph to another preset (with the transport playing)");
+    followButton.onClick = [this] { proc.followOn = followButton.getToggleState(); proc.syncFollow(); refreshPresetButtons(); };
+    addAndMakeVisible (followButton);
+    const auto smallLabel = [this] (juce::Label& l, const char* text)
+    {
+        l.setText (text, juce::dontSendNotification);
+        l.setFont (CustomLookAndFeel::getMonoFont (11.0f));
+        l.setColour (juce::Label::textColourId, dimText);
+        l.setJustificationType (juce::Justification::centredRight);
+        addAndMakeVisible (l);
+    };
+    smallLabel (everyLabel, "EVERY");
+    smallLabel (landLabel, "MORPH");
+    smallLabel (chanceLabel, "CHANCE");
+    smallLabel (pickLabel, "PICK");
+    for (int i = 0; i < 5; ++i) everyBox.addItem (juce::String (FollowSettings::kEveryBars[i]) + (i == 0 ? " BAR" : " BARS"), i + 1);
+    everyBox.onChange = [this] { proc.followEvery = everyBox.getSelectedId() - 1; };
+    everyBox.setTooltip ("How long a phrase is: a change can only happen on these bar lines");
+    landBox.addItem ("STARTS ON THE LINE", 1);
+    landBox.addItem ("ENDS ON THE LINE", 2);
+    landBox.onChange = [this] { proc.followLand = landBox.getSelectedId() - 1; };
+    landBox.setTooltip ("Starts on the line: the morph begins on the bar line. Ends on the line: it begins a morph time earlier and arrives on it");
+    pickBox.addItem ("ANY OTHER", 1);
+    pickBox.addItem ("ANY (CAN STAY)", 2);
+    pickBox.addItem ("NEXT", 3);
+    pickBox.addItem ("PREVIOUS", 4);
+    pickBox.onChange = [this] { proc.followPick = pickBox.getSelectedId() - 1; };
+    pickBox.setTooltip ("Which preset comes next. Right-click a preset to make it come up more or less often, or never");
+    for (auto* b : { &everyBox, &landBox, &pickBox }) addAndMakeVisible (*b);
+    chanceSlider.setSliderStyle (juce::Slider::LinearHorizontal);
+    chanceSlider.setTextBoxStyle (juce::Slider::TextBoxRight, false, 46, 20);
+    chanceSlider.setRange (0.0, 100.0, 1.0);
+    chanceSlider.setTextValueSuffix ("%");
+    chanceSlider.setColour (juce::Slider::textBoxTextColourId, accent);
+    chanceSlider.setColour (juce::Slider::textBoxOutlineColourId, juce::Colours::transparentBlack);
+    chanceSlider.setTooltip ("How likely a change is at each phrase line");
+    chanceSlider.onValueChange = [this] { proc.followChance = (int) chanceSlider.getValue(); };
+    addAndMakeVisible (chanceSlider);
+    followStatus.setFont (CustomLookAndFeel::getMonoFont (11.0f));
+    followStatus.setColour (juce::Label::textColourId, dimText);
+    followStatus.setJustificationType (juce::Justification::centredLeft);
+    addAndMakeVisible (followStatus);
+    refreshFollow();
+
     // Param grid
     for (int i = 0; i < 16; ++i)
     {
@@ -550,6 +627,10 @@ void MorphoEditor::showPresetMenu (int idx)
     m.addItem (1, preset.hasData ? "Save current values here (replace)" : "Save current values here");
     m.addItem (2, "Rename...", preset.hasData);
     m.addItem (3, "Clear", preset.hasData);
+    juce::PopupMenu follow;
+    const std::pair<int, const char*> weights[] = { { 0, "Never (skip it)" }, { 1, "Less often" }, { 2, "Normal" }, { 4, "More often" } };
+    for (auto [w, label] : weights) follow.addItem (10 + w, label, preset.hasData, preset.weight == w);
+    m.addSubMenu ("Follow: how often it's picked", follow, preset.hasData);
 
     juce::Component::SafePointer<MorphoEditor> safeThis (this);
     m.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (presetButtons[idx]),
@@ -563,6 +644,7 @@ void MorphoEditor::showPresetMenu (int idx)
             }
             else if (choice == 2) ed.askPresetName (idx);
             else if (choice == 3) ed.proc.clearPreset (idx);
+            else if (choice >= 10 && choice <= 14) { ed.proc.setPresetWeight (idx, choice - 10); ed.refreshPresetButtons(); }
         });
 }
 
@@ -587,6 +669,7 @@ void MorphoEditor::paint (juce::Graphics& g)
     g.drawHorizontalLine (40,  0, (float) w);
     g.drawHorizontalLine (105, 0, (float) w);
     g.drawHorizontalLine (170, 0, (float) w);
+    g.drawHorizontalLine (235, 0, (float) w);
 }
 
 void MorphoEditor::resized()
@@ -603,6 +686,8 @@ void MorphoEditor::resized()
     layoutPresets (area.removeFromTop    (scaled (56)));
     area.removeFromTop (scaled (4));
     layoutMorph   (area.removeFromTop    (scaled (56)));
+    area.removeFromTop (scaled (4));
+    layoutFollow  (area.removeFromTop    (scaled (56)));
     area.removeFromTop (scaled (4));
     layoutParams  (area);
 }
@@ -642,6 +727,50 @@ void MorphoEditor::layoutMorph (juce::Rectangle<int> area)
     morphTimeValueLabel.setBounds (area.removeFromRight  (64).reduced (2, 8));
     morphTimeSlider.setBounds     (area.removeFromRight  (area.getWidth() - 90).reduced (0, 8));
     morphTimeLabel2.setBounds     (area.reduced (2, 8));
+}
+
+void MorphoEditor::layoutFollow (juce::Rectangle<int> area)
+{
+    // [FOLLOW] [EVERY][4 BARS] [MORPH][STARTS ON THE LINE] [CHANCE][----] [PICK][ANY OTHER]
+    // and under them, what's coming.
+    auto status = area.removeFromBottom (area.getHeight() / 3);
+    followStatus.setBounds (status.withTrimmedLeft (4));
+    const auto row = [&] (int w) { return area.removeFromLeft (juce::roundToInt (w * getWidth() / (double) kWidth)); };
+    followButton.setBounds (row (90).reduced (2, 4));
+    everyLabel.setBounds (row (52).reduced (2, 4));
+    everyBox.setBounds (row (90).reduced (2, 4));
+    landLabel.setBounds (row (52).reduced (2, 4));
+    landBox.setBounds (row (160).reduced (2, 4));
+    chanceLabel.setBounds (row (60).reduced (2, 4));
+    chanceSlider.setBounds (row (130).reduced (2, 4));
+    pickLabel.setBounds (row (42).reduced (2, 4));
+    pickBox.setBounds (area.reduced (2, 4));
+}
+
+void MorphoEditor::refreshFollow()
+{
+    followButton.setToggleState (proc.followOn.load(), juce::dontSendNotification);
+    everyBox.setSelectedId (proc.followEvery.load() + 1, juce::dontSendNotification);
+    landBox.setSelectedId (proc.followLand.load() + 1, juce::dontSendNotification);
+    pickBox.setSelectedId (proc.followPick.load() + 1, juce::dontSendNotification);
+    chanceSlider.setValue (proc.followChance.load(), juce::dontSendNotification);
+    const bool on = proc.followOn.load();
+    for (juce::Component* c : { (juce::Component*) &everyBox, (juce::Component*) &landBox, (juce::Component*) &pickBox, (juce::Component*) &chanceSlider })
+        c->setAlpha (on ? 1.0f : 0.5f);
+
+    juce::String st;
+    int saved = 0;
+    for (const auto& pr : proc.presets) saved += pr.hasData ? 1 : 0;
+    if (! on) st = "Follow is off: turn it on to let MORPHO move between presets on its own, in time";
+    else if (saved < 2) st = "Save at least two presets for Follow to move between";
+    else if (proc.followNextBar() < 0) st = "Waiting for Live to play";
+    else
+    {
+        const int nx = proc.followNextPreset();
+        st = "BAR " + juce::String (proc.followNextBar()) + ": "
+           + (nx >= 0 ? "-> " + juce::String (nx + 1) + " " + proc.presets[(size_t) nx].name : juce::String ("stays"));
+    }
+    if (followStatus.getText() != st) followStatus.setText (st, juce::dontSendNotification);
 }
 
 void MorphoEditor::layoutParams (juce::Rectangle<int> area)
@@ -688,6 +817,7 @@ void MorphoEditor::timerCallback()
     if (leverStatus.getText() != st) { leverStatus.setText (st, juce::dontSendNotification); leverStatus.setColour (juce::Label::textColourId, c); }
     // Map buttons change state without a morph (waiting, mapped): keep them current.
     for (auto* pc : paramComponents) pc->refresh();
+    refreshFollow();
 }
 
 void MorphoEditor::refreshPresetButtons()

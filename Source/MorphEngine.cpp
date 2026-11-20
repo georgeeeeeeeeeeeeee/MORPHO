@@ -20,14 +20,12 @@ MorphEngine::~MorphEngine() { stopTimer(); }
 //==============================================================================
 // Message thread
 //==============================================================================
-void MorphEngine::startMorph (const std::array<int, 16>& targets,
-                               const std::array<ParameterSlot, 16>& slots,
-                               int globalChannel,
-                               double morphTimeMs)
+MorphEngine::Request MorphEngine::makeRequest (const std::array<int, 16>& targets, const std::array<ParameterSlot, 16>& slots,
+                                               int globalChannel, double morphTimeMs, int curve)
 {
     Request r;
     r.durationMs = juce::jmax (0.0, morphTimeMs);
-    r.curve      = curveMode.load (std::memory_order_relaxed);
+    r.curve      = curve;
 
     for (size_t i = 0; i < 16; ++i)
     {
@@ -37,6 +35,25 @@ void MorphEngine::startMorph (const std::array<int, 16>& targets,
         r.lows    [i] = juce::jlimit (0, 127, slots[i].minValue);
         r.highs   [i] = juce::jlimit (0, 127, slots[i].maxValue);
     }
+    return r;
+}
+
+void MorphEngine::setTable (const std::array<std::array<int, 16>, 16>& presetValues, const std::array<ParameterSlot, 16>& slots,
+                            int globalChannel, double morphTimeMs)
+{
+    std::array<Request, 16> t;
+    for (size_t p = 0; p < 16; ++p)
+        t[p] = makeRequest (presetValues[p], slots, globalChannel, morphTimeMs, curveMode.load (std::memory_order_relaxed));
+    const juce::SpinLock::ScopedLockType lock (tableLock);
+    table = t;
+}
+
+void MorphEngine::startMorph (const std::array<int, 16>& targets,
+                               const std::array<ParameterSlot, 16>& slots,
+                               int globalChannel,
+                               double morphTimeMs)
+{
+    const Request r = makeRequest (targets, slots, globalChannel, morphTimeMs, curveMode.load (std::memory_order_relaxed));
 
     const bool snap = r.durationMs <= 0.0;
 
@@ -125,7 +142,51 @@ void MorphEngine::emitChanged (juce::MidiBuffer& midi, int samplePos) noexcept
     }
 }
 
-void MorphEngine::process (juce::MidiBuffer& midi, int numSamples) noexcept
+// Starts a request now: a snap sends its values at once; a morph starts from wherever the values are.
+void MorphEngine::begin (const Request& r, juce::MidiBuffer& midi, int offset) noexcept
+{
+    active = r;
+    if (active.durationMs <= 0.0)
+    {
+        running  = false;
+        liveVals = active.targets;
+        emitChanged (midi, offset);
+        for (size_t i = 0; i < 16; ++i)
+            currentVals[i].store (liveVals[i], std::memory_order_relaxed);
+        progress.store (1.0f, std::memory_order_relaxed);
+        return;
+    }
+
+    for (size_t i = 0; i < 16; ++i)
+        startVals[i] = (double) liveVals[i];
+
+    elapsedSamples = 0.0;
+    totalSamples   = juce::jmax (1.0, active.durationMs * 0.001 * sampleRate);
+    running        = true;
+    morphActive.store (true, std::memory_order_release);
+}
+
+bool MorphEngine::startFromTable (int preset, juce::MidiBuffer& midi, int offset) noexcept
+{
+    if (preset < 0 || preset >= 16) return false;
+    Request r;
+    {
+        const juce::SpinLock::ScopedTryLockType lock (tableLock);
+        if (! lock.isLocked()) return false;
+        r = table[(size_t) preset];
+    }
+    hasPending.store (false, std::memory_order_release);   // this replaces anything the UI had queued
+    begin (r, midi, offset);
+    if (! running)
+    {
+        // A snap is final at once: tell the message thread (it updates the knobs).
+        morphActive.store (false, std::memory_order_release);
+        finishedPending.store (true, std::memory_order_release);
+    }
+    return true;
+}
+
+void MorphEngine::process (juce::MidiBuffer& midi, int numSamples, int offset) noexcept
 {
     if (numSamples <= 0)
         return;
@@ -140,24 +201,9 @@ void MorphEngine::process (juce::MidiBuffer& midi, int numSamples) noexcept
 
         if (lock.isLocked() && hasPending.exchange (false, std::memory_order_acq_rel))
         {
-            active = pendingRequest;
-
-            if (active.durationMs <= 0.0)
-            {
-                running  = false;
-                liveVals = active.targets;
-                emitChanged (midi, 0);
-                // currentVals was already set by startMorph
-                return;
-            }
-
-            for (size_t i = 0; i < 16; ++i)
-                startVals[i] = (double) liveVals[i];
-
-            elapsedSamples = 0.0;
-            totalSamples   = juce::jmax (1.0, active.durationMs * 0.001 * sampleRate);
-            running        = true;
-            morphActive.store (true, std::memory_order_release);
+            begin (pendingRequest, midi, offset);
+            if (! running)
+                return;   // a snap (currentVals was already set by startMorph)
         }
     }
 
@@ -178,7 +224,7 @@ void MorphEngine::process (juce::MidiBuffer& midi, int numSamples) noexcept
             liveVals[i] = juce::jlimit (0, 127, juce::roundToInt (v));
         }
 
-        emitChanged (midi, pos);
+        emitChanged (midi, offset + pos);
 
         if (t >= 1.0)
             running = false;

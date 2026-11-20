@@ -40,9 +40,20 @@ public:
     // Invoked on the message thread when a morph completes or is stopped
     std::function<void (const std::array<int, 16>&)> onMorphFinished;
 
+    // Follow (message thread): the morph to each preset, ready made, so the audio thread can start
+    // one on an exact sample. Rebuilt whenever presets or settings may have changed.
+    void setTable (const std::array<std::array<int, 16>, 16>& presetValues,
+                   const std::array<ParameterSlot, 16>& slots,
+                   int globalChannel,
+                   double morphTimeMs);
+
     // ── Audio thread ──────────────────────────────────────────────────────────
     void prepare (double newSampleRate) noexcept   { sampleRate = newSampleRate > 0.0 ? newSampleRate : 44100.0; }
-    void process (juce::MidiBuffer& midi, int numSamples) noexcept;
+    // offset: where in the host's block this call's first sample is (for MIDI timestamps).
+    void process (juce::MidiBuffer& midi, int numSamples, int offset = 0) noexcept;
+    // Starts the table's morph to a preset now (at `offset` in the block). False if the table was
+    // being rebuilt at that instant (the caller tries again next block).
+    bool startFromTable (int preset, juce::MidiBuffer& midi, int offset) noexcept;
 
 private:
     struct Request
@@ -57,8 +68,15 @@ private:
     };
 
     void timerCallback() override;
+    void begin (const Request& r, juce::MidiBuffer& midi, int offset) noexcept;   // audio thread
+    static Request makeRequest (const std::array<int, 16>& targets, const std::array<ParameterSlot, 16>& slots,
+                                int globalChannel, double morphTimeMs, int curve);
     static double applyCurve (int curve, double t) noexcept;
     void emitChanged (juce::MidiBuffer& midi, int samplePos) noexcept;
+
+    // Follow's table
+    juce::SpinLock tableLock;
+    std::array<Request, 16> table {};
 
     // Hand-over from message thread to audio thread
     juce::SpinLock    requestLock;

@@ -155,6 +155,10 @@ void MorphoProcessor::timerCallback()
         lever::Bus::get().sendSysex (leverLink.hello ("MORPHO"));
     }
     bool changed = false;
+    // Follow: show what it moved to, and keep its table current (knob ranges, CC numbers, morph time).
+    if (const int f = fired.exchange (-1); f >= 0 && f < 16) { activePreset = f; changed = true; }
+    morphTimeMsAtomic = morphTimeMs;
+    if (followOn.load()) syncFollow();
     const int ch = leverChannel - 1;
     for (const auto& r : leverLink.pop())
     {
@@ -208,7 +212,9 @@ void MorphoProcessor::handleAsyncUpdate()
 //==============================================================================
 void MorphoProcessor::prepareToPlay (double sampleRate, int)
 {
+    sr = sampleRate > 0.0 ? sampleRate : 44100.0;
     morphEngine.prepare (sampleRate);
+    syncFollow();
 }
 
 void MorphoProcessor::releaseResources() {}
@@ -217,7 +223,120 @@ void MorphoProcessor::processBlock (juce::AudioBuffer<float>& buffer,
                                     juce::MidiBuffer& midiMessages)
 {
     // Audio and incoming MIDI pass through untouched; our CC messages are added.
-    morphEngine.process (midiMessages, buffer.getNumSamples());
+    runFollow (midiMessages, buffer.getNumSamples());
+}
+
+//==============================================================================
+// Follow
+//==============================================================================
+void MorphoProcessor::setPresetWeight (int index, int weight)
+{
+    if (index < 0 || index >= 16) return;
+    presets[(size_t) index].weight = juce::jlimit (0, 4, weight);
+    syncFollow();
+    notifyStateChanged();
+}
+
+void MorphoProcessor::syncFollow()
+{
+    std::array<std::array<int, 16>, 16> values {};
+    for (size_t i = 0; i < 16; ++i)
+    {
+        values[i] = presets[i].values;
+        weights[i] = presets[i].hasData ? presets[i].weight : 0;
+    }
+    morphEngine.setCurveMode (curveMode);
+    morphEngine.setTable (values, paramSlots, globalChannel, morphTimeMs);
+}
+
+// The next preset after `current`, by the Pick rule and the weights (-1: none, or it stays).
+int MorphoProcessor::pickNext (int cur) noexcept
+{
+    const int pick = followPick.load();
+    if (pick == FollowSettings::next || pick == FollowSettings::previous)
+    {
+        const int dir = pick == FollowSettings::next ? 1 : -1;
+        int i = cur < 0 ? (dir > 0 ? -1 : 16) : cur;
+        for (int n = 0; n < 16; ++n)
+        {
+            i = (i + dir + 16) % 16;
+            if (i != cur && weights[(size_t) i].load() > 0) return i;
+        }
+        return -1;
+    }
+    int total = 0;
+    for (int i = 0; i < 16; ++i)
+        if (pick == FollowSettings::any || i != cur) total += weights[(size_t) i].load();
+    if (total <= 0) return -1;
+    int r = rng.nextInt (total);
+    for (int i = 0; i < 16; ++i)
+    {
+        if (pick != FollowSettings::any && i == cur) continue;
+        r -= weights[(size_t) i].load();
+        if (r < 0) return i == cur ? -1 : i;   // Any: picking the one playing means it stays
+    }
+    return -1;
+}
+
+// Phrase lines are every N bars from the song's bar 1. Each line is decided once, as soon as it's
+// the next one: a chance roll, then a pick. "Start on the line" starts the morph on it; "arrive on
+// the line" starts it the morph time earlier (at most one phrase), so it lands on the line. The
+// morph starts on its exact sample; the block is processed in two parts around it.
+void MorphoProcessor::runFollow (juce::MidiBuffer& midi, int n)
+{
+    juce::Optional<juce::AudioPlayHead::PositionInfo> pos;
+    if (auto* ph = getPlayHead()) pos = ph->getPosition();
+    const bool playing = followOn.load() && pos && pos->getIsPlaying() && pos->getPpqPosition() && pos->getBpm() && *pos->getBpm() > 1.0;
+    if (! playing)
+    {
+        wasPlaying = false;
+        planned = -1;
+        nextBar = -1;
+        morphEngine.process (midi, n);
+        return;
+    }
+    const double ppq = *pos->getPpqPosition(), bpm = *pos->getBpm();
+    const auto sig = pos->getTimeSignature().orFallback (juce::AudioPlayHead::TimeSignature {});
+    const double bar = std::max (0.25, sig.numerator * 4.0 / std::max (1, sig.denominator));
+    const double origin = pos->getPpqPositionOfLastBarStart() ? std::fmod (*pos->getPpqPositionOfLastBarStart(), bar) : 0.0;
+    const double phrase = bar * FollowSettings::kEveryBars[juce::jlimit (0, 4, followEvery.load())];
+    const double perSample = bpm / 60.0 / sr, end = ppq + n * perSample, eps = 1.0e-7;
+    // Press play, or the transport jumped back (a loop, a click on the timeline): start fresh, and
+    // a line exactly where play starts doesn't count (pressing play on bar 1 shouldn't change preset).
+    if (! wasPlaying || ppq < lastPpq - eps) { playFrom = ppq; decided = -1.0e9; planned = -1; }
+    wasPlaying = true;
+    lastPpq = ppq;
+
+    const double lead = followLand.load() == FollowSettings::arriveOnTheLine
+                            ? std::min (morphTimeMsAtomic.load() * 0.001 * bpm / 60.0, phrase) : 0.0;
+    // The next line whose start point (line - lead) is still ahead (or exactly now).
+    double line = origin + std::ceil ((ppq + lead - origin) / phrase - eps) * phrase;
+    if (line - lead <= playFrom + eps && ppq <= playFrom + eps) line += phrase;
+    if (std::abs (line - decided) > eps)
+    {
+        decided = line;
+        planned = -1;
+        if (rng.nextInt (100) < juce::jlimit (0, 100, followChance.load()))
+            planned = pickNext (current.load());
+        nextBar = (int) std::llround ((line - origin) / bar) + 1;
+        nextPreset = planned;
+    }
+    const double at = line - lead;
+    if (planned >= 0 && at >= ppq - eps && at < end)
+    {
+        const int k = juce::jlimit (0, n, (int) std::llround ((at - ppq) / perSample));
+        morphEngine.process (midi, k, 0);
+        if (morphEngine.startFromTable (planned, midi, k))
+        {
+            current = planned;
+            fired = planned;
+            planned = -1;
+            nextPreset = -1;
+        }
+        morphEngine.process (midi, n - k, k);
+        return;
+    }
+    morphEngine.process (midi, n);
 }
 
 //==============================================================================
@@ -243,6 +362,7 @@ void MorphoProcessor::savePreset (int index)
     // Cycle through 8 colors on each save
     p.colorIndex = (p.colorIndex + 1) % 8;
     p.hasData    = true;
+    syncFollow();
 
     notifyStateChanged();
 }
@@ -251,7 +371,8 @@ void MorphoProcessor::clearPreset (int index)
 {
     if (index < 0 || index >= 16) return;
     presets[(size_t) index] = PresetSlot {};
-    if (activePreset == index) activePreset = -1;
+    if (activePreset == index) { activePreset = -1; current = -1; }
+    syncFollow();
     notifyStateChanged();
 }
 
@@ -270,6 +391,7 @@ void MorphoProcessor::recallPreset (int index)
     if (! presets[index].hasData) return;
 
     activePreset = index;
+    current = index;
     morphEngine.setCurveMode (curveMode);
 
     morphEngine.startMorph (presets[index].values,
@@ -297,6 +419,11 @@ void MorphoProcessor::getStateInformation (juce::MemoryBlock& destData)
     state.setProperty (id ("curveMode"),     (int) curveMode, nullptr);
     state.setProperty (id ("activePreset"),  activePreset,  nullptr);
     state.setProperty (id ("leverChannel"),  leverChannel,  nullptr);
+    state.setProperty (id ("followOn"),      followOn.load(),     nullptr);
+    state.setProperty (id ("followEvery"),   followEvery.load(),  nullptr);
+    state.setProperty (id ("followLand"),    followLand.load(),   nullptr);
+    state.setProperty (id ("followChance"),  followChance.load(), nullptr);
+    state.setProperty (id ("followPick"),    followPick.load(),   nullptr);
 
     for (int i = 0; i < 16; ++i)
     {
@@ -318,6 +445,7 @@ void MorphoProcessor::getStateInformation (juce::MemoryBlock& destData)
         preset.setProperty (id ("name"),       presets[i].name,       nullptr);
         preset.setProperty (id ("colorIndex"), presets[i].colorIndex, nullptr);
         preset.setProperty (id ("hasData"),    presets[i].hasData,    nullptr);
+        preset.setProperty (id ("weight"),     presets[i].weight,     nullptr);
         for (int j = 0; j < 16; ++j)
             preset.setProperty (juce::Identifier ("v" + juce::String (j)), presets[i].values[j], nullptr);
         state.addChild (preset, -1, nullptr);
@@ -344,6 +472,11 @@ void MorphoProcessor::setStateInformation (const void* data, int sizeInBytes)
     morphTimeMs   = juce::jlimit (0.0, 30000.0, (double) state.getProperty (id ("morphTimeMs"), 0.0));
     curveMode     = (MorphEngine::CurveMode) intProp (state, "curveMode", 0, 0, 2);
     activePreset  = intProp (state, "activePreset", -1, -1, 15);
+    followOn      = (bool) state.getProperty (id ("followOn"), false);
+    followEvery   = intProp (state, "followEvery", 2, 0, 4);
+    followLand    = intProp (state, "followLand", 0, 0, 1);
+    followChance  = intProp (state, "followChance", 100, 0, 100);
+    followPick    = intProp (state, "followPick", 0, 0, 3);
     // The saved Lever channel, so the set's mappings (made on it) still apply.
     if (state.hasProperty (id ("leverChannel")))
     {
@@ -379,6 +512,7 @@ void MorphoProcessor::setStateInformation (const void* data, int sizeInBytes)
             preset.name       = child.getProperty (id ("name"), "").toString().substring (0, 16);
             preset.colorIndex = intProp (child, "colorIndex", 0, 0, 7);
             preset.hasData    = (bool) child.getProperty (id ("hasData"), false);
+            preset.weight     = intProp (child, "weight", 2, 0, 4);
             for (int j = 0; j < 16; ++j)
                 preset.values[(size_t) j] = intProp (child, ("v" + juce::String (j)).toRawUTF8(), 0, 0, 127);
             ++presetIdx;
@@ -396,6 +530,9 @@ void MorphoProcessor::setStateInformation (const void* data, int sizeInBytes)
     for (size_t i = 0; i < 16; ++i) vals[i] = paramSlots[i].value;
     // Trigger a snap (0ms) to the current values to prime the engine
     morphEngine.startMorph (vals, paramSlots, globalChannel, 0.0);
+    current = activePreset;
+    morphTimeMsAtomic = morphTimeMs;
+    syncFollow();
 
     notifyStateChanged();
 }

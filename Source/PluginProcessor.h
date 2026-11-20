@@ -15,6 +15,16 @@ struct PresetSlot
     std::array<int, 16> values     = {};
     int                 colorIndex = 0;
     bool                hasData    = false;
+    int                 weight     = 2;   // Follow: how often it's picked (0 never, 1 less, 2 normal, 4 more)
+};
+
+// Follow: like Live's follow actions, for presets. At the end of each phrase (every N bars) it may
+// morph to another preset, picked by chance and each preset's weight.
+struct FollowSettings
+{
+    static constexpr int kEveryBars[] = { 1, 2, 4, 8, 16 };
+    enum Land { onTheLine = 0, arriveOnTheLine = 1 };     // the morph starts on the bar line / ends on it
+    enum Pick { anyOther = 0, any = 1, next = 2, previous = 3 };
 };
 
 //==============================================================================
@@ -74,6 +84,21 @@ public:
     void stopMorph();
     void setRange (int slot, int lo, int hi);   // message thread: also resends the slot's output
 
+    // ── Follow (message thread writes, the audio thread reads) ─────────────────
+    std::atomic<bool> followOn { false };
+    std::atomic<int>  followEvery { 2 };         // index into FollowSettings::kEveryBars (default 4 bars)
+    std::atomic<int>  followLand { 0 };          // FollowSettings::Land
+    std::atomic<int>  followChance { 100 };      // % chance of a change at each phrase
+    std::atomic<int>  followPick { 0 };          // FollowSettings::Pick
+    void setPresetWeight (int index, int weight);
+    void syncFollow();                           // after presets or settings change: refresh what the audio thread uses
+    // What's coming (for the editor): the bar number of the next phrase line (-1: none), and the preset
+    // it goes to there (-1: it stays).
+    int followNextBar() const noexcept { return nextBar.load(); }
+    int followNextPreset() const noexcept { return nextPreset.load(); }
+    void setFollowSeed (uint32_t s) noexcept { rng.setSeed ((juce::int64) s); }   // tests
+    void timerCallbackForTests() { timerCallback(); }
+
     // ── Click-to-map through the Lever script in Live (message thread) ──────────
     // Each slot can also drive any Live control: Map, then click the control in Live. MORPHO sends
     // the slot's value on the shared "IAC Driver Lever" bus (channel leverChannel, CC = slot index),
@@ -106,6 +131,19 @@ private:
     } busSender { *this };
     std::array<std::atomic<int>, 16> rangeLo {}, rangeHi {};   // copies for the bus thread
     void syncRanges();
+
+    // Follow, audio thread.
+    void runFollow (juce::MidiBuffer&, int numSamples);
+    int pickNext (int current) noexcept;
+    std::array<std::atomic<int>, 16> weights {};   // 0 for empty presets
+    std::atomic<int> current { -1 };               // the preset playing (either thread sets it)
+    std::atomic<int> fired { -1 };                 // Follow moved to this preset (the timer picks it up)
+    std::atomic<int> nextBar { -1 }, nextPreset { -1 };
+    std::atomic<double> morphTimeMsAtomic { 0.0 };   // the morph time, for the audio thread
+    double decided = -1.0e9, lastPpq = -1.0e9, playFrom = 0.0, sr = 44100.0;
+    int planned = -1;
+    bool wasPlaying = false;
+    juce::Random rng;
 
     lever::Link leverLink;
     std::array<std::atomic<int>, 16> link {};
