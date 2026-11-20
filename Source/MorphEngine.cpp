@@ -34,6 +34,8 @@ void MorphEngine::startMorph (const std::array<int, 16>& targets,
         r.targets [i] = juce::jlimit (0, 127, targets[i]);
         r.ccNums  [i] = juce::jlimit (0, 127, slots[i].ccNumber);
         r.channels[i] = juce::jlimit (1, 16, slots[i].channel == 0 ? globalChannel : slots[i].channel);
+        r.lows    [i] = juce::jlimit (0, 127, slots[i].minValue);
+        r.highs   [i] = juce::jlimit (0, 127, slots[i].maxValue);
     }
 
     const bool snap = r.durationMs <= 0.0;
@@ -108,7 +110,8 @@ void MorphEngine::emitChanged (juce::MidiBuffer& midi, int samplePos) noexcept
 {
     for (size_t i = 0; i < 16; ++i)
     {
-        const int val = liveVals[i];
+        // The knob position (0–127) scaled into the slot's range.
+        const int val = juce::roundToInt (active.lows[i] + (active.highs[i] - active.lows[i]) * liveVals[i] / 127.0);
         const int cc  = active.ccNums[i];
         const int ch  = active.channels[i];
 

@@ -117,10 +117,35 @@ int main()
     }
 
     {
+        // Range: the knob covers only Min..Max (presets keep knob positions)
+        MorphoProcessor p;
+        p.prepareToPlay (sr, 512);
+        run (p, 1024);
+        p.setRange (0, 40, 80);
+        std::array<int, 16> v {};
+        v[0] = 127;
+        p.morphEngine.startMorph (v, p.paramSlots, p.globalChannel, 0.0);
+        auto top = lastValues (run (p, 1024));
+        v[0] = 0;
+        p.morphEngine.startMorph (v, p.paramSlots, p.globalChannel, 0.0);
+        auto bottom = lastValues (run (p, 1024));
+        v[0] = 64;
+        p.morphEngine.startMorph (v, p.paramSlots, p.globalChannel, 0.0);
+        auto mid = lastValues (run (p, 1024));
+        check (top[0] == 80 && bottom[0] == 40 && std::abs (mid[0] - 60) <= 1,
+               "range 40-80: knob 127 sends 80, 0 sends 40, 64 sends 60 (got " + juce::String (top[0]) + ", " + juce::String (bottom[0]) + ", " + juce::String (mid[0]) + ")");
+        p.paramSlots[0].value = 127;
+        p.setRange (0, 0, 100);
+        check (lastValues (run (p, 1024))[0] == 100, "changing the range resends the slot through the new range");
+        settle();
+    }
+
+    {
         // Session round trip, and a damaged session
         MorphoProcessor a;
         a.globalChannel = 5; a.morphTimeMs = 2500.0; a.curveMode = MorphEngine::CurveMode::EASE;
         a.paramSlots[2].name = "Cutoff"; a.paramSlots[2].ccNumber = 74; a.paramSlots[2].value = 33; a.paramSlots[2].channel = 9;
+        a.paramSlots[2].minValue = 20; a.paramSlots[2].maxValue = 90;
         a.presets[4].hasData = true; a.presets[4].name = "Drop"; a.presets[4].values[2] = 120;
         juce::MemoryBlock mb;
         a.getStateInformation (mb);
@@ -128,7 +153,8 @@ int main()
         MorphoProcessor b;
         b.setStateInformation (mb.getData(), (int) mb.getSize());
         check (b.globalChannel == 5 && b.morphTimeMs == 2500.0 && b.curveMode == MorphEngine::CurveMode::EASE, "global settings survive a save and load");
-        check (b.paramSlots[2].name == "Cutoff" && b.paramSlots[2].ccNumber == 74 && b.paramSlots[2].value == 33 && b.paramSlots[2].channel == 9, "a slot survives a save and load");
+        check (b.paramSlots[2].name == "Cutoff" && b.paramSlots[2].ccNumber == 74 && b.paramSlots[2].value == 33 && b.paramSlots[2].channel == 9
+               && b.paramSlots[2].minValue == 20 && b.paramSlots[2].maxValue == 90, "a slot (with its range) survives a save and load");
         check (b.presets[4].hasData && b.presets[4].name == "Drop" && b.presets[4].values[2] == 120, "a preset survives a save and load");
 
         juce::ValueTree bad ("MorphoState");
@@ -174,6 +200,8 @@ int main()
         p.activePreset = 1;
         p.paramSlots[0].name = "Cutoff"; p.paramSlots[0].ccNumber = 74; p.paramSlots[0].value = 90;
         p.paramSlots[1].name = "Resonance"; p.paramSlots[1].ccNumber = 71; p.paramSlots[1].value = 40;
+        p.paramSlots[0].minValue = 30; p.paramSlots[0].maxValue = 100;
+        p.presets[0].hasData = true; p.presets[0].name = "Preset 1";
         std::unique_ptr<juce::AudioProcessorEditor> ed (p.createEditor());
         check (ed != nullptr && ed->getWidth() == 820 && ed->getHeight() == 560, "the window opens at its full size");
         ed->setSize (410, 280);
@@ -181,6 +209,13 @@ int main()
         ed->setSize (820, 560);
         auto img = ed->createComponentSnapshot (ed->getLocalBounds(), true, 2.0f);
         check (img.isValid() && img.getWidth() == 1640, "the window draws");
+        if (auto* path = std::getenv ("MORPHO_SNAPSHOT"))   // MORPHO_SNAPSHOT=ui.png: save the picture
+        {
+            juce::File f (juce::File::getCurrentWorkingDirectory().getChildFile (path));
+            f.deleteFile();
+            juce::FileOutputStream os (f);
+            juce::PNGImageFormat().writeImageToStream (img, os);
+        }
         if (auto path = juce::SystemStats::getEnvironmentVariable ("MORPHO_SNAPSHOT", {}); path.isNotEmpty())
         {
             juce::File f (path);

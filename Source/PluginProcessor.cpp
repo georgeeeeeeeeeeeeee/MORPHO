@@ -52,6 +52,7 @@ MorphoProcessor::MorphoProcessor()
         notifyStateChanged();
     };
 
+    syncRanges();
     leverChannel = claimChannel();
     for (auto& v : busSender.last) v = -1;
     busSender.startTimer (5);
@@ -67,6 +68,31 @@ MorphoProcessor::~MorphoProcessor()
 }
 
 //==============================================================================
+void MorphoProcessor::syncRanges()
+{
+    for (size_t i = 0; i < 16; ++i)
+    {
+        rangeLo[i] = juce::jlimit (0, 127, paramSlots[i].minValue);
+        rangeHi[i] = juce::jlimit (0, 127, paramSlots[i].maxValue);
+    }
+}
+
+void MorphoProcessor::setRange (int i, int lo, int hi)
+{
+    if (i < 0 || i >= 16) return;
+    paramSlots[(size_t) i].minValue = juce::jlimit (0, 127, lo);
+    paramSlots[(size_t) i].maxValue = juce::jlimit (0, 127, hi);
+    syncRanges();
+    // Resend outputs through the range (a zero-length morph to where the knobs already are).
+    if (! morphEngine.isMorphing())
+    {
+        std::array<int, 16> v {};
+        for (size_t k = 0; k < 16; ++k) v[k] = paramSlots[k].value;
+        morphEngine.startMorph (v, paramSlots, globalChannel, 0.0);
+    }
+}
+
+// Mapped slots go to Live as 14-bit (CC n + CC n+32), so even a narrow range moves smoothly.
 void MorphoProcessor::BusSender::hiResTimerCallback()
 {
     const auto vals = owner.morphEngine.getCurrentValues();
@@ -74,9 +100,13 @@ void MorphoProcessor::BusSender::hiResTimerCallback()
     for (size_t i = 0; i < 16; ++i)
     {
         if (owner.link[i].load() != (int) Link::mapped) { last[i] = -1; continue; }
-        if (vals[i] == last[i]) continue;
-        lever::Bus::get().send ((uint8_t) (0xB0 | ch), (uint8_t) i, (uint8_t) juce::jlimit (0, 127, vals[i]));
-        last[i] = vals[i];
+        const double lo = owner.rangeLo[i].load(), hi = owner.rangeHi[i].load();
+        const double out = (lo + (hi - lo) * juce::jlimit (0, 127, vals[i]) / 127.0) / 127.0;
+        const int q = juce::jlimit (0, 16383, juce::roundToInt (out * 16383.0));
+        if (q == last[i]) continue;
+        lever::Bus::get().send ((uint8_t) (0xB0 | ch), (uint8_t) i, (uint8_t) (q >> 7));
+        lever::Bus::get().send ((uint8_t) (0xB0 | ch), (uint8_t) (i + 32), (uint8_t) (q & 127));
+        last[i] = q;
     }
 }
 
@@ -103,7 +133,7 @@ void MorphoProcessor::requestMap (int i)
     link[(size_t) i] = (int) Link::waiting;
     askedMs = juce::Time::getMillisecondCounterHiRes();
     silent = false;
-    lever::Bus::get().sendSysex (leverLink.map (ch, i, false, "MORPHO: " + paramSlots[(size_t) i].name));
+    lever::Bus::get().sendSysex (leverLink.map (ch, i, true, "MORPHO: " + paramSlots[(size_t) i].name));
     notifyStateChanged();
 }
 
@@ -275,6 +305,8 @@ void MorphoProcessor::getStateInformation (juce::MemoryBlock& destData)
         slot.setProperty (id ("cc"),       paramSlots[i].ccNumber, nullptr);
         slot.setProperty (id ("channel"),  paramSlots[i].channel,  nullptr);
         slot.setProperty (id ("value"),    paramSlots[i].value,    nullptr);
+        slot.setProperty (id ("min"),      paramSlots[i].minValue, nullptr);
+        slot.setProperty (id ("max"),      paramSlots[i].maxValue, nullptr);
         if (linkState (i) == Link::mapped || linkState (i) == Link::lost)
             slot.setProperty (id ("mappedTo"), mappedNames[(size_t) i], nullptr);
         state.addChild (slot, -1, nullptr);
@@ -334,6 +366,8 @@ void MorphoProcessor::setStateInformation (const void* data, int sizeInBytes)
             slot.ccNumber = intProp (child, "cc",      (int) paramIdx + 1, 0, 127);
             slot.channel  = intProp (child, "channel", 0, 0, 16);
             slot.value    = intProp (child, "value",   0, 0, 127);
+            slot.minValue = intProp (child, "min",     0, 0, 127);
+            slot.maxValue = intProp (child, "max",   127, 0, 127);
             // Shown until Lever confirms it (or reports it gone) a moment after the set opens.
             mappedNames[paramIdx] = child.getProperty (id ("mappedTo"), "").toString();
             link[paramIdx] = (int) (mappedNames[paramIdx].isEmpty() ? Link::none : Link::mapped);
@@ -351,6 +385,7 @@ void MorphoProcessor::setStateInformation (const void* data, int sizeInBytes)
         }
     }
 
+    syncRanges();
     if (activePreset >= 0 && ! presets[(size_t) activePreset].hasData)
         activePreset = -1;
     morphEngine.setCurveMode (curveMode);

@@ -72,6 +72,7 @@ public:
     void renamePreset (int index, const juce::String& name);
     void recallPreset (int index);
     void stopMorph();
+    void setRange (int slot, int lo, int hi);   // message thread: also resends the slot's output
 
     // ── Click-to-map through the Lever script in Live (message thread) ──────────
     // Each slot can also drive any Live control: Map, then click the control in Live. MORPHO sends
@@ -103,6 +104,8 @@ private:
         MorphoProcessor& owner;
         std::array<int, 16> last {};
     } busSender { *this };
+    std::array<std::atomic<int>, 16> rangeLo {}, rangeHi {};   // copies for the bus thread
+    void syncRanges();
 
     lever::Link leverLink;
     std::array<std::atomic<int>, 16> link {};

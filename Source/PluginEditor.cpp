@@ -3,6 +3,75 @@
 using namespace MorphoColors;
 
 //==============================================================================
+// InlinePrompt
+//==============================================================================
+InlinePrompt::InlinePrompt()
+{
+    field.setFont (CustomLookAndFeel::getMonoFont (14.0f));
+    field.setJustification (juce::Justification::centredLeft);
+    field.onReturnKey = [this] { finish (true); };
+    field.onEscapeKey = [this] { finish (false); };
+    okButton.onClick = [this] { finish (true); };
+    cancelButton.onClick = [this] { finish (false); };
+    for (juce::Component* c : std::initializer_list<juce::Component*> { &field, &okButton, &cancelButton }) addAndMakeVisible (*c);
+    setVisible (false);
+}
+
+void InlinePrompt::ask (const juce::String& t, const juce::String& initial, int maxChars, const juce::String& allowed,
+                        std::function<void (const juce::String&)> onOk)
+{
+    title = t;
+    callback = std::move (onOk);
+    field.setInputRestrictions (maxChars, allowed);
+    field.setText (initial, false);
+    setBounds (getParentComponent() != nullptr ? getParentComponent()->getLocalBounds() : getBounds());
+    setVisible (true);
+    toFront (true);
+    field.grabKeyboardFocus();
+    field.selectAll();
+    repaint();
+}
+
+void InlinePrompt::finish (bool ok)
+{
+    auto cb = std::move (callback);
+    const auto text = field.getText();
+    setVisible (false);
+    callback = nullptr;
+    if (ok && cb) cb (text);
+}
+
+void InlinePrompt::paint (juce::Graphics& g)
+{
+    g.fillAll (juce::Colours::black.withAlpha (0.55f));
+    g.setColour (surface);
+    g.fillRoundedRectangle (box.toFloat(), 6.0f);
+    g.setColour (accent);
+    g.drawRoundedRectangle (box.toFloat(), 6.0f, 1.5f);
+    g.setColour (brightText);
+    g.setFont (CustomLookAndFeel::getMonoFont (13.0f).boldened());
+    g.drawText (title, box.reduced (16, 12).removeFromTop (22), juce::Justification::centredLeft);
+}
+
+void InlinePrompt::resized()
+{
+    box = getLocalBounds().withSizeKeepingCentre (juce::jmin (380, getWidth() - 20), 130);
+    auto r = box.reduced (16, 12);
+    r.removeFromTop (28);
+    field.setBounds (r.removeFromTop (30));
+    r.removeFromTop (12);
+    auto buttons = r.removeFromTop (28);
+    okButton.setBounds (buttons.removeFromRight (90));
+    buttons.removeFromRight (8);
+    cancelButton.setBounds (buttons.removeFromRight (90));
+}
+
+void InlinePrompt::mouseDown (const juce::MouseEvent& e)
+{
+    if (! box.contains (e.getPosition())) finish (false);
+}
+
+//==============================================================================
 // PresetSlotButton
 //==============================================================================
 PresetSlotButton::PresetSlotButton (int idx, MorphoProcessor& p)
@@ -126,6 +195,26 @@ ParamSlotComponent::ParamSlotComponent (int idx, MorphoProcessor& p, CustomLookA
     linkLabel.setInterceptsMouseClicks (false, false);
     addAndMakeVisible (linkLabel);
 
+    // Range: drag the left handle up to raise the lowest value, the right one down to lower the highest.
+    range.setSliderStyle (juce::Slider::TwoValueHorizontal);
+    range.setTextBoxStyle (juce::Slider::NoTextBox, false, 0, 0);
+    range.setRange (0, 127, 1);
+    range.setColour (juce::Slider::trackColourId, accent.withAlpha (0.55f));
+    range.setColour (juce::Slider::backgroundColourId, trackBg);
+    range.setColour (juce::Slider::thumbColourId, brightText);
+    range.setDoubleClickReturnValue (false, 0);
+    range.onValueChange = [this]
+    {
+        if (ignoreSlider) return;
+        proc.setRange (index, (int) range.getMinValue(), (int) range.getMaxValue());
+        repaint (rangeText);
+        range.setTooltip ("Range " + juce::String ((int) range.getMinValue()) + " to " + juce::String ((int) range.getMaxValue())
+                          + ": the knob sends only between these. Double-click: full range");
+    };
+    range.addMouseListener (this, false);
+    range.setTooltip ("Range: the knob sends only between these. Double-click: full range");
+    addAndMakeVisible (range);
+
     // Value knob
     valueKnob.setSliderStyle (juce::Slider::Rotary);
     valueKnob.setTextBoxStyle (juce::Slider::NoTextBox, false, 0, 0);
@@ -176,6 +265,11 @@ void ParamSlotComponent::refresh()
         displayVal = vals[index];
     }
     valueKnob.setValue (displayVal, juce::dontSendNotification);
+    if (! range.isMouseButtonDown())
+    {
+        range.setMinValue (slot.minValue, juce::dontSendNotification, true);
+        range.setMaxValue (slot.maxValue, juce::dontSendNotification, true);
+    }
     ignoreSlider = false;
 
     int chId = (slot.channel == 0) ? 1 : (slot.channel + 1);
@@ -236,10 +330,12 @@ void ParamSlotComponent::resized()
 
     area.removeFromBottom (2);
 
-    // Knob fills remaining space, centered
-    int knobSize = juce::jmin (area.getWidth(), area.getHeight());
-    knobSize = juce::jmin (knobSize, 62);
-    valueKnob.setBounds (area.withSizeKeepingCentre (knobSize, knobSize));
+    // Middle: the knob on the left, its range bar beside it (with the numbers under the bar)
+    const int knobSize = juce::jmin (62, area.getHeight(), area.getWidth() / 3);
+    valueKnob.setBounds (area.removeFromLeft (knobSize).withSizeKeepingCentre (knobSize, knobSize));
+    area.removeFromLeft (8);
+    rangeText = area.withSizeKeepingCentre (area.getWidth(), 12).translated (0, 9);
+    range.setBounds (area.withSizeKeepingCentre (area.getWidth(), 16).translated (0, -5));
 }
 
 void ParamSlotComponent::paint (juce::Graphics& g)
@@ -248,6 +344,12 @@ void ParamSlotComponent::paint (juce::Graphics& g)
     g.fillRoundedRectangle (getLocalBounds().toFloat(), 4.0f);
     g.setColour (surface.brighter (0.1f));
     g.drawRoundedRectangle (getLocalBounds().toFloat().reduced (0.5f), 4.0f, 0.8f);
+    const auto& slot = proc.paramSlots[(size_t) index];
+    const bool full = slot.minValue == 0 && slot.maxValue == 127;
+    g.setColour (full ? dimText : accent);
+    g.setFont (CustomLookAndFeel::getMonoFont (9.5f));
+    g.drawText (full ? juce::String ("RANGE: FULL") : "RANGE " + juce::String (slot.minValue) + "-" + juce::String (slot.maxValue),
+                rangeText, juce::Justification::centredLeft);
 }
 
 void ParamSlotComponent::sliderValueChanged (juce::Slider* s)
@@ -275,30 +377,25 @@ void ParamSlotComponent::mouseDown (const juce::MouseEvent& e)
     {
         showCCPopup();
     }
+    else if (e.eventComponent == &range && e.getNumberOfClicks() >= 2)
+    {
+        proc.setRange (index, 0, 127);
+        refresh();
+    }
 }
 
 void ParamSlotComponent::showCCPopup()
 {
-    auto* aw = new juce::AlertWindow ("Set CC",
-        "CC number for " + proc.paramSlots[(size_t) index].name + ":",
-        juce::MessageBoxIconType::NoIcon);
-    aw->addTextEditor ("cc", juce::String (proc.paramSlots[(size_t) index].ccNumber));
-    aw->addButton ("OK",     1);
-    aw->addButton ("Cancel", 0);
-    // The dialog can outlive this component (the host closes the plugin window while it's
-    // open), so the callback checks before touching it.
+    auto* ed = findParentComponentOfClass<MorphoEditor>();
+    if (ed == nullptr) return;
     juce::Component::SafePointer<ParamSlotComponent> safeThis (this);
-    aw->enterModalState (true, juce::ModalCallbackFunction::create (
-        [safeThis, aw] (int result)
+    ed->prompt().ask ("CC number for " + proc.paramSlots[(size_t) index].name, juce::String (proc.paramSlots[(size_t) index].ccNumber), 3, "0123456789",
+        [safeThis] (const juce::String& text)
         {
-            if (result == 1 && safeThis != nullptr)
-            {
-                const int cc = aw->getTextEditorContents ("cc").getIntValue();
-                safeThis->proc.paramSlots[(size_t) safeThis->index].ccNumber = juce::jlimit (0, 127, cc);
-                safeThis->refresh();
-            }
-            delete aw;
-        }), false);
+            if (safeThis == nullptr) return;
+            safeThis->proc.paramSlots[(size_t) safeThis->index].ccNumber = juce::jlimit (0, 127, text.getIntValue());
+            safeThis->refresh();
+        });
 }
 
 //==============================================================================
@@ -434,6 +531,7 @@ void MorphoEditor::buildUI()
     refreshPresetButtons();
     refreshParamSlots();
     refreshMorphControls();
+    addChildComponent (inlinePrompt);   // last, so it sits above everything
 }
 
 //==============================================================================
@@ -456,9 +554,7 @@ void MorphoEditor::showPresetMenu (int idx)
             auto& ed = *safeThis;
             if (choice == 1)
             {
-                const bool replacing = ed.proc.presets[(size_t) idx].hasData;
-                ed.proc.savePreset (idx);
-                if (! replacing) ed.askPresetName (idx);
+                ed.proc.savePreset (idx);   // no naming step (George: not needed); Rename... is there if wanted
             }
             else if (choice == 2) ed.askPresetName (idx);
             else if (choice == 3) ed.proc.clearPreset (idx);
@@ -467,19 +563,12 @@ void MorphoEditor::showPresetMenu (int idx)
 
 void MorphoEditor::askPresetName (int idx)
 {
-    auto* aw = new juce::AlertWindow ("Name preset " + juce::String (idx + 1), "Up to 16 characters:", juce::MessageBoxIconType::NoIcon);
-    aw->addTextEditor ("name", proc.presets[(size_t) idx].name);
-    aw->addButton ("OK", 1, juce::KeyPress (juce::KeyPress::returnKey));
-    aw->addButton ("Cancel", 0, juce::KeyPress (juce::KeyPress::escapeKey));
-
     juce::Component::SafePointer<MorphoEditor> safeThis (this);
-    aw->enterModalState (true, juce::ModalCallbackFunction::create (
-        [safeThis, aw, idx] (int result)
+    inlinePrompt.ask ("Name preset " + juce::String (idx + 1), proc.presets[(size_t) idx].name, 16, {},
+        [safeThis, idx] (const juce::String& text)
         {
-            if (result == 1 && safeThis != nullptr)
-                safeThis->proc.renamePreset (idx, aw->getTextEditorContents ("name"));
-            delete aw;
-        }), false);
+            if (safeThis != nullptr) safeThis->proc.renamePreset (idx, text);
+        });
 }
 
 //==============================================================================
@@ -497,6 +586,7 @@ void MorphoEditor::paint (juce::Graphics& g)
 
 void MorphoEditor::resized()
 {
+    inlinePrompt.setBounds (getLocalBounds());
     if (presetButtons.size() < 16 || paramComponents.size() < 16)
         return;
 

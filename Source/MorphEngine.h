@@ -50,6 +50,8 @@ private:
         std::array<int, 16> targets  {};
         std::array<int, 16> ccNums   {};
         std::array<int, 16> channels {};   // already resolved to 1–16
+        std::array<int, 16> lows {};      // each slot's output range (full until a request says otherwise)
+        std::array<int, 16> highs { 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127 };
         double durationMs = 0.0;
         int    curve      = 0;
     };

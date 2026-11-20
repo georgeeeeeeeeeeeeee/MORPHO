@@ -10,5 +10,7 @@ struct ParameterSlot
     juce::String name     = "Param";
     int          ccNumber = 1;
     int          channel  = 0;   // 0 = follow global channel
-    int          value    = 0;   // 0–127
+    int          value    = 0;   // 0–127: the knob
+    int          minValue = 0;   // the output range the knob covers: 0 maps to minValue,
+    int          maxValue = 127; // 127 to maxValue (presets store knob positions, not outputs)
 };

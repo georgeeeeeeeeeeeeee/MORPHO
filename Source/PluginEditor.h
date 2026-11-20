@@ -13,6 +13,28 @@ class ParamSlotComponent;
 class PresetSlotButton;
 
 //==============================================================================
+// A small question drawn inside MORPHO's own window (a separate pop-up window ends up behind plug-in
+// windows that Live keeps on top). Enter: OK. Esc or a click outside: cancel.
+class InlinePrompt : public juce::Component
+{
+public:
+    InlinePrompt();
+    void ask (const juce::String& title, const juce::String& initial, int maxChars, const juce::String& allowed,
+              std::function<void (const juce::String&)> onOk);
+    void paint (juce::Graphics&) override;
+    void resized() override;
+    void mouseDown (const juce::MouseEvent&) override;
+
+private:
+    void finish (bool ok);
+    juce::String title;
+    juce::TextEditor field;
+    juce::TextButton okButton { "OK" }, cancelButton { "CANCEL" };
+    std::function<void (const juce::String&)> callback;
+    juce::Rectangle<int> box;
+};
+
+//==============================================================================
 class MorphoEditor : public juce::AudioProcessorEditor,
                      public juce::Timer
 {
@@ -23,6 +45,7 @@ public:
     void paint   (juce::Graphics&) override;
     void resized () override;
     void timerCallback () override;   // 30 Hz UI refresh
+    InlinePrompt& prompt() { return inlinePrompt; }
 
 private:
     void buildUI();
@@ -64,6 +87,8 @@ private:
 
     //--- Parameter grid ---
     juce::OwnedArray<ParamSlotComponent> paramComponents;
+
+    InlinePrompt inlinePrompt;   // on top of everything
 
     static constexpr int kWidth  = 820;
     static constexpr int kHeight = 560;
@@ -115,6 +140,8 @@ private:
     juce::Label    ccLabel;
     juce::TextButton mapButton { "MAP" };
     juce::Label    linkLabel;
+    juce::Slider   range;   // two handles: the lowest and highest value the knob sends
+    juce::Rectangle<int> rangeText;
     juce::Slider   valueKnob;
     juce::ComboBox channelBox;
 
