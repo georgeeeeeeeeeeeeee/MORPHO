@@ -3,7 +3,7 @@
 All notable changes to MORPHO are recorded here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [SemVer](https://semver.org/).
 
-## [1.0.0] - unreleased
+## [1.0.0] - 2026-11-21
 
 First public release, VST3 for macOS 12+ (universal: Apple silicon and Intel) and 64-bit Windows 10/11.
 
@@ -12,6 +12,12 @@ First public release, VST3 for macOS 12+ (universal: Apple silicon and Intel) an
 - Morphs from an instant snap to 30 seconds, linear, eased or S-curve, timed by the audio clock
   and placed sample-accurately inside each block
 - Only changed values are sent
+- Each slot has its own range: the lowest and highest value its knob sends
+- Touching a knob mid-morph takes it over from the morph
+- Follow: on phrase lines (every 1, 2, 4, 8 or 16 bars), with a chance, MORPHO moves on to
+  another preset by itself (any other, any, next or previous, with a weight per preset)
+- Click-to-map in Ableton Live through the Lever control script: click Map, then click a Live
+  control
 - Everything is saved with your project
 - Every build is checked with pluginval at its strictest level
 
