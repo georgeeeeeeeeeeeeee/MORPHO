@@ -16,8 +16,8 @@ First public release, VST3 for macOS 12+ (universal: Apple silicon and Intel) an
 - Touching a knob mid-morph takes it over from the morph
 - Follow: on phrase lines (every 1, 2, 4, 8 or 16 bars), with a chance, MORPHO moves on to
   another preset by itself (any other, any, next or previous, with a weight per preset)
-- Click-to-map in Ableton Live through the Lever control script: click Map, then click a Live
-  control
+- Click-to-map in Ableton Live: click Map, then click a Live control. This needs the Lever
+  control script, which isn't released yet; without it, MORPHO works as before
 - Everything is saved with your project
 - Every build is checked with pluginval at its strictest level
 
